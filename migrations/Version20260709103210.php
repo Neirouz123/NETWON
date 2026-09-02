@@ -19,47 +19,15 @@ final class Version20260709103210 extends AbstractMigration
 
     public function up(Schema $schema): void
     {
-        // this up() migration is auto-generated, please modify it to your needs
-        $this->addSql('ALTER TABLE analyse_resultat DROP stats_json');
-        $this->addSql('ALTER TABLE analyse_resultat DROP max_trafic_fdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP max_trafic_tdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP nombre_occurrences_tdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP nombre_occurrences_fdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP capacite_mbps');
-        $this->addSql('ALTER TABLE analyse_resultat DROP duree_jours');
-        $this->addSql('ALTER TABLE analyse_resultat DROP dropcong_tdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP dropcong_fdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP dropcong_tf');
-        $this->addSql('ALTER TABLE analyse_resultat DROP taux_utilisation');
-        $this->addSql('ALTER TABLE analyse_resultat DROP taux_utilisation_tdd');
-        $this->addSql('ALTER TABLE analyse_resultat DROP taux_utilisation_fdd');
-        $this->addSql('ALTER TABLE ticket_history DROP max_trafic');
-        $this->addSql('ALTER TABLE ticket_history DROP capacite_mbps');
-        $this->addSql('ALTER TABLE ticket_history ALTER date_jour TYPE TIMESTAMP(0) WITHOUT TIME ZONE');
-        $this->addSql('ALTER TABLE ticket_task ADD wo_ip_content TEXT DEFAULT NULL');
-        $this->addSql('ALTER TABLE ticket_task ADD fh_fields JSON DEFAULT NULL');
+        // No-op. Exact duplicate of Version20260709103159: the ticket_task
+        // columns wo_ip_content / fh_fields are already added by the earlier
+        // migration, and the analyse_resultat / ticket_history statements
+        // target Python-managed columns that do not exist at migration time.
+        // Re-running them would fail ("column already exists"), so this
+        // migration is intentionally empty.
     }
 
     public function down(Schema $schema): void
     {
-        // this down() migration is auto-generated, please modify it to your needs
-        $this->addSql('ALTER TABLE analyse_resultat ADD stats_json JSONB DEFAULT NULL');
-        $this->addSql('ALTER TABLE analyse_resultat ADD max_trafic_fdd NUMERIC(15, 4) DEFAULT NULL');
-        $this->addSql('ALTER TABLE analyse_resultat ADD max_trafic_tdd NUMERIC(15, 4) DEFAULT NULL');
-        $this->addSql('ALTER TABLE analyse_resultat ADD nombre_occurrences_tdd INT DEFAULT 0');
-        $this->addSql('ALTER TABLE analyse_resultat ADD nombre_occurrences_fdd INT DEFAULT 0');
-        $this->addSql('ALTER TABLE analyse_resultat ADD capacite_mbps NUMERIC(15, 4) DEFAULT \'0\'');
-        $this->addSql('ALTER TABLE analyse_resultat ADD duree_jours INT DEFAULT 7');
-        $this->addSql('ALTER TABLE analyse_resultat ADD dropcong_tdd INT DEFAULT 0');
-        $this->addSql('ALTER TABLE analyse_resultat ADD dropcong_fdd INT DEFAULT 0');
-        $this->addSql('ALTER TABLE analyse_resultat ADD dropcong_tf INT DEFAULT 0');
-        $this->addSql('ALTER TABLE analyse_resultat ADD taux_utilisation NUMERIC(8, 2) DEFAULT NULL');
-        $this->addSql('ALTER TABLE analyse_resultat ADD taux_utilisation_tdd NUMERIC(8, 2) DEFAULT NULL');
-        $this->addSql('ALTER TABLE analyse_resultat ADD taux_utilisation_fdd NUMERIC(8, 2) DEFAULT NULL');
-        $this->addSql('ALTER TABLE ticket_history ADD max_trafic DOUBLE PRECISION DEFAULT NULL');
-        $this->addSql('ALTER TABLE ticket_history ADD capacite_mbps DOUBLE PRECISION DEFAULT NULL');
-        $this->addSql('ALTER TABLE ticket_history ALTER date_jour TYPE DATE');
-        $this->addSql('ALTER TABLE ticket_task DROP wo_ip_content');
-        $this->addSql('ALTER TABLE ticket_task DROP fh_fields');
     }
 }

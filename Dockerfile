@@ -2,7 +2,7 @@ FROM composer:2 AS vendor
 
 WORKDIR /app
 COPY composer.json composer.lock symfony.lock ./
-RUN composer install --no-dev --no-interaction --no-progress --prefer-dist --optimize-autoloader --no-scripts
+RUN composer install --no-dev --no-interaction --no-progress --prefer-dist --optimize-autoloader --no-scripts --ignore-platform-req=ext-gd
 
 FROM php:8.3-apache-bookworm
 
@@ -29,10 +29,12 @@ COPY docker/symfony/php.ini /usr/local/etc/php/conf.d/zz-production.ini
 WORKDIR /var/www/html
 COPY --chown=www-data:www-data . .
 COPY --from=vendor --chown=www-data:www-data /app/vendor ./vendor
+COPY docker/symfony/entrypoint.sh /usr/local/bin/symfony-entrypoint
+RUN chmod +x /usr/local/bin/symfony-entrypoint
 
-RUN APP_SECRET=build-time-placeholder \
-    DATABASE_URL='postgresql://app:app@postgres:5432/app?serverVersion=16&charset=utf8' \
-    php bin/console cache:warmup --env=prod --no-debug \
+RUN mkdir -p var/cache var/log \
     && chown -R www-data:www-data var
 
 EXPOSE 80
+ENTRYPOINT ["symfony-entrypoint"]
+CMD ["apache2-foreground"]

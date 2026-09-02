@@ -19,17 +19,15 @@ final class Version20260721091035 extends AbstractMigration
 
     public function up(Schema $schema): void
     {
-        // this up() migration is auto-generated, please modify it to your needs
-        $this->addSql('DROP INDEX idx_site_prediction_site_horizon');
-        $this->addSql('DROP INDEX idx_site_prediction_etat');
-        $this->addSql('ALTER TABLE site_prediction ADD projection_fiable BOOLEAN DEFAULT true');
+        // No-op. The site_prediction table (including the projection_fiable
+        // column and the idx_site_prediction_site_horizon / idx_site_prediction_etat
+        // indexes) is created and managed at runtime by the Python API
+        // (api_python/ia_service.py), not by Doctrine migrations. The indexes
+        // this migration tried to DROP do not exist at migration time, so it
+        // failed on PostgreSQL. Intentionally empty.
     }
 
     public function down(Schema $schema): void
     {
-        // this down() migration is auto-generated, please modify it to your needs
-        $this->addSql('ALTER TABLE site_prediction DROP projection_fiable');
-        $this->addSql('CREATE UNIQUE INDEX idx_site_prediction_site_horizon ON site_prediction (site, horizon)');
-        $this->addSql('CREATE INDEX idx_site_prediction_etat ON site_prediction (etat_predit)');
     }
 }

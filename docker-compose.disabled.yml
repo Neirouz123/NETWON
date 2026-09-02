@@ -5,9 +5,11 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in the deployment environment}
-      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the deployment environment}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}
+      POSTGRES_DB: ${POSTGRES_DB:-pfe_5g}
+      POSTGRES_USER: ${POSTGRES_USER:-pfe_5g}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pfe_5g}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -19,17 +21,31 @@ services:
       retries: 5
       start_period: 20s
 
+  mailpit:
+    image: axllent/mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks:
+      - backend
+
   api-python:
     build:
       context: .
       dockerfile: api_python/Dockerfile
     restart: unless-stopped
+    ports:
+      - "${PYTHON_API_PORT:-8001}:8001"
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
-      DB_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in the deployment environment}
-      DB_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the deployment environment}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment environment}
+      DB_NAME: ${POSTGRES_DB:-pfe_5g}
+      DB_USER: ${POSTGRES_USER:-pfe_5g}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-pfe_5g}
     networks:
       - backend
     depends_on:
@@ -39,7 +55,7 @@ services:
       test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health', timeout=3)"]
       interval: 30s
       timeout: 5s
-      retries: 3
+      retries: 5
       start_period: 30s
 
   migrations:
@@ -49,10 +65,10 @@ services:
     restart: "no"
     command: ["php", "bin/console", "doctrine:migrations:migrate", "--no-interaction", "--allow-no-migration"]
     environment:
-      APP_ENV: prod
+      APP_ENV: ${APP_ENV:-prod}
       APP_DEBUG: "0"
-      APP_SECRET: ${APP_SECRET:?Set APP_SECRET in the deployment environment}
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in the deployment environment}
+      APP_SECRET: ${APP_SECRET:-change-me-local-secret}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pfe_5g:pfe_5g@postgres:5432/pfe_5g?serverVersion=16&charset=utf8}
     networks:
       - backend
     depends_on:
@@ -67,15 +83,15 @@ services:
     ports:
       - "${APP_PORT:-8080}:80"
     environment:
-      APP_ENV: prod
+      APP_ENV: ${APP_ENV:-prod}
       APP_DEBUG: "0"
-      APP_SECRET: ${APP_SECRET:?Set APP_SECRET in the deployment environment}
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in the deployment environment}
-      PYTHON_API_BASE_URL: http://api-python:8001
-      DEFAULT_URI: ${DEFAULT_URI:?Set DEFAULT_URI to the public application URL}
-      CRON_TOKEN: ${CRON_TOKEN:?Set CRON_TOKEN in the deployment environment}
-      MAILER_DSN: ${MAILER_DSN:?Set MAILER_DSN in the deployment environment}
-      OLLAMA_URL: ${OLLAMA_URL:?Set OLLAMA_URL to the Ollama service URL}
+      APP_SECRET: ${APP_SECRET:-change-me-local-secret}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pfe_5g:pfe_5g@postgres:5432/pfe_5g?serverVersion=16&charset=utf8}
+      PYTHON_API_BASE_URL: ${PYTHON_API_BASE_URL:-http://api-python:8001}
+      DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}
+      CRON_TOKEN: ${CRON_TOKEN:-change_this_secret_token}
+      MAILER_DSN: ${MAILER_DSN:-smtp://mailpit:1025}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
     networks:
       - backend
       - frontend
@@ -98,7 +114,6 @@ networks:
     driver: bridge
   backend:
     driver: bridge
-    internal: true
 
 volumes:
   postgres_data:

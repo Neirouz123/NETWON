@@ -1,25 +1,103 @@
 
+name: pfe-5g
+
 services:
-###> doctrine/doctrine-bundle ###
-  database:
-    image: postgres:${POSTGRES_VERSION:-16}-alpine
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-app}
-      # You should definitely change the password in production
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-!ChangeMe!}
-      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-pfe_5g}
+      POSTGRES_USER: ${POSTGRES_USER:-pfe_5g}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pfe_5g}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "pg_isready", "-d", "${POSTGRES_DB:-app}", "-U", "${POSTGRES_USER:-app}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 60s
-    volumes:
-      - database_data:/var/lib/postgresql/data:rw
-      # You may use a bind-mounted host directory instead, so that it is harder to accidentally remove the volume and lose all your data!
-      # - ./docker/db/data:/var/lib/postgresql/data:rw
-###< doctrine/doctrine-bundle ###
+      start_period: 20s
+
+  mailpit:
+    image: axllent/mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks:
+      - backend
+
+  api-python:
+    build:
+      context: .
+      dockerfile: api_python/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${PYTHON_API_PORT:-8001}:8001"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-pfe_5g}
+      DB_USER: ${POSTGRES_USER:-pfe_5g}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-pfe_5g}
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  symfony:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:80"
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      APP_DEBUG: "0"
+      APP_SECRET: ${APP_SECRET:-change-me-local-secret}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pfe_5g:pfe_5g@postgres:5432/pfe_5g?serverVersion=16&charset=utf8}
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      PYTHON_API_BASE_URL: ${PYTHON_API_BASE_URL:-http://api-python:8001}
+      DEFAULT_URI: ${DEFAULT_URI:-http://localhost:8080}
+      CRON_TOKEN: ${CRON_TOKEN:-change_this_secret_token}
+      MAILER_DSN: ${MAILER_DSN:-smtp://mailpit:1025}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+    networks:
+      - backend
+      - frontend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api-python:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1/ > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
 
 volumes:
-###> doctrine/doctrine-bundle ###
-  database_data:
-###< doctrine/doctrine-bundle ###
+  postgres_data:

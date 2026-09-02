@@ -22,25 +22,16 @@ final class Version20260514000000 extends AbstractMigration
 
     public function up(Schema $schema): void
     {
-        $this->addSql('ALTER TABLE ticket_task ADD COLUMN site_validated VARCHAR(255) DEFAULT NULL');
-        $this->addSql('ALTER TABLE ticket_task ADD COLUMN started_at DATETIME DEFAULT NULL');
-        $this->addSql('ALTER TABLE ticket_task ADD COLUMN next_assigned_to_id INT DEFAULT NULL');
-        
-        // Ajouter la contrainte de clé étrangère
-        $this->addSql('ALTER TABLE ticket_task ADD CONSTRAINT FK_NEXT_ASSIGNED_TO FOREIGN KEY (next_assigned_to_id) REFERENCES user(id) ON DELETE SET NULL');
-        
-        // Ajouter un index pour les performances
-        $this->addSql('CREATE INDEX IDX_TICKET_TASK_SITE_VALIDATED ON ticket_task (site_validated)');
-        $this->addSql('CREATE INDEX IDX_TICKET_TASK_STARTED_AT ON ticket_task (started_at)');
+        // No-op. The schema changes described here (site_validated, started_at,
+        // next_assigned_to_id + FK + index) are applied by the subsequent,
+        // correctly-generated PostgreSQL migration Version20260514133006.
+        // This earlier migration was originally written with MySQL-only syntax
+        // (DATETIME, unquoted `user`, DROP FOREIGN KEY, DROP INDEX ... ON),
+        // which PostgreSQL rejects. Keeping it as a no-op preserves the
+        // migration version ordering without breaking the schema.
     }
 
     public function down(Schema $schema): void
     {
-        $this->addSql('DROP INDEX IDX_TICKET_TASK_SITE_VALIDATED ON ticket_task');
-        $this->addSql('DROP INDEX IDX_TICKET_TASK_STARTED_AT ON ticket_task');
-        $this->addSql('ALTER TABLE ticket_task DROP FOREIGN KEY FK_NEXT_ASSIGNED_TO');
-        $this->addSql('ALTER TABLE ticket_task DROP COLUMN site_validated');
-        $this->addSql('ALTER TABLE ticket_task DROP COLUMN started_at');
-        $this->addSql('ALTER TABLE ticket_task DROP COLUMN next_assigned_to_id');
     }
 }

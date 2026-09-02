@@ -19,17 +19,14 @@ final class Version20260520061333 extends AbstractMigration
 
     public function up(Schema $schema): void
     {
-        // this up() migration is auto-generated, please modify it to your needs
-        $this->addSql('ALTER TABLE ticket_task ALTER site_validated TYPE VARCHAR(255)');
-        $this->addSql('ALTER TABLE ticket_task ADD CONSTRAINT FK_60A5CE1D502CB44E FOREIGN KEY (next_assigned_to_id) REFERENCES "user" (id) ON DELETE SET NULL NOT DEFERRABLE');
-        $this->addSql('CREATE INDEX IDX_60A5CE1D502CB44E ON ticket_task (next_assigned_to_id)');
+        // No-op. The schema changes originally listed here (site_validated as
+        // VARCHAR(255), the FK_60A5CE1D502CB44E constraint and its index on
+        // next_assigned_to_id) were already created by the previous migration
+        // Version20260514133006. Re-running them here fails on PostgreSQL with
+        // "constraint already exists", so this migration is intentionally empty.
     }
 
     public function down(Schema $schema): void
     {
-        // this down() migration is auto-generated, please modify it to your needs
-        $this->addSql('ALTER TABLE ticket_task DROP CONSTRAINT FK_60A5CE1D502CB44E');
-        $this->addSql('DROP INDEX IDX_60A5CE1D502CB44E');
-        $this->addSql('ALTER TABLE ticket_task ALTER site_validated TYPE BOOLEAN');
     }
 }
