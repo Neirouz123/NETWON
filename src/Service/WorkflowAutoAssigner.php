@@ -3,8 +3,8 @@
 
 namespace App\Service;
 
-use App\Entity\ProcessedSite;
 use App\Entity\Ticket;
+use App\Entity\TicketSite;
 use App\Entity\TicketTask;
 use App\Entity\User;
 use App\Repository\UserRepository;
@@ -13,88 +13,79 @@ use Psr\Log\LoggerInterface;
 
 class WorkflowAutoAssigner
 {
-    private EntityManagerInterface $em;
-    private UserRepository $userRepo;
-    private LoggerInterface $logger;
-    private NotificationService $notificationService;
-
     public function __construct(
-        EntityManagerInterface $em,
-        UserRepository $userRepo,
-        LoggerInterface $logger,
-        NotificationService $notificationService
-    ) {
-        $this->em = $em;
-        $this->userRepo = $userRepo;
-        $this->logger = $logger;
-        $this->notificationService = $notificationService;
-    }
+        private EntityManagerInterface $em,
+        private UserRepository $userRepo,
+        private LoggerInterface $logger,
+        private NotificationService $notificationService,
+        private WorkflowStepChain $stepChain
+    ) {}
 
-    public function assignUsersForSites(array $sites, Ticket $ticket, User $currentUser): array
+    /**
+     * Crée UNE tâche par TicketSite (jamais un lot multi-sites), pour la
+     * première étape de la chaîne correspondant au service du site.
+     *
+     * Le point d'entrée est résolu par DÉPARTEMENT exact (jamais un
+     * "service seul", qui pouvait retomber sur n'importe quel utilisateur
+     * du service — c'était la cause du bug où tout finissait toujours
+     * chez Ingénierie Capillaire pour FH) :
+     *   - FH  -> ingenierie_capillaire (fh_etude_prerequis)
+     *   - FO  -> ingenierie_ip (fo_initial_analysis)
+     *   - DEPLOIEMENT -> deploiement_telecom
+     *   - SHARED -> pas de département dédié, reste sur le service
+     *
+     * Répartition round-robin entre les users du département/service
+     * cible pour ne pas tout envoyer au même utilisateur.
+     *
+     * @param TicketSite[] $ticketSites
+     * @return User[] utilisateurs notifiés (dédupliqués)
+     */
+    public function assignUsersForTicketSites(array $ticketSites, Ticket $ticket, User $currentUser): array
     {
         $assignedUsers = [];
+        $roundRobinCursor = [];
 
-        $sitesByService = [];
-        foreach ($sites as $site) {
-            $service = $site->getService();
-            if (empty($service)) {
-                $service = 'SHARED';
-            }
-            $service = strtoupper($service);
-            $sitesByService[$service][] = $site;
-        }
+        foreach ($ticketSites as $ticketSite) {
+            $service = strtoupper($ticketSite->getServiceName() ?: 'SHARED');
 
-        foreach ($sitesByService as $service => $serviceSites) {
-            $user = $this->findUserForService($service);
+            $entryDepartment = match ($service) {
+                'FH' => 'ingenierie_capillaire',
+                'FO' => 'ingenierie_ip',
+                'DEPLOIEMENT' => 'deploiement_telecom',
+                default => null,
+            };
+
+            $user = $entryDepartment
+                ? $this->pickUserForDepartment($entryDepartment, $roundRobinCursor)
+                : $this->pickUserForService($service, $roundRobinCursor);
 
             if (!$user) {
-                $this->logger->warning('Aucun utilisateur pour le service {service}.', ['service' => $service]);
-                $user = $this->findUserForService('SHARED');
-                if (!$user) {
-                    $user = $currentUser;
-                    $this->logger->warning('Assignation à {user} (fallback).', ['user' => $user->getUserIdentifier()]);
-                }
+                $user = $this->pickUserForService('SHARED', $roundRobinCursor) ?? $currentUser;
+                $this->logger->warning(
+                    'Aucun utilisateur trouvé pour {target}, fallback appliqué.',
+                    ['target' => $entryDepartment ?? $service]
+                );
             }
 
-            // ✅ CORRIGÉ (bug principal) : le departmentName de la tâche
-            // était auparavant déduit UNIQUEMENT du service du site via
-            // une table de correspondance figée qui ne couvrait ni
-            // 'support_backhaul' ni 'support_radio'. Résultat : si
-            // l'utilisateur assigné avait justement pour vrai
-            // département 'support_backhaul' (ou 'support_radio'), sa
-            // tâche recevait quand même un departmentName totalement
-            // différent (ex: 'operator') -- la rendant invisible dans
-            // son propre tableau de bord (UserSupportBackhaulController /
-            // UserSupportRadioController filtrent strictement sur
-            // departmentName), alors que DeadlineAlertService le listait
-            // bien comme "responsable" du ticket (lui, ne filtrant pas
-            // par département).
-            //
-            // On utilise maintenant en priorité le VRAI département de
-            // l'utilisateur assigné ($user->getDepartment()), qui est la
-            // source de vérité utilisée par tous les tableaux de bord
-            // spécialisés (Backhaul, Radio, Déploiement, FO...). La table
-            // de correspondance par service ne sert plus que de repli si
-            // l'utilisateur n'a aucun département renseigné en base.
-            $defaultDepartmentByService = match ($service) {
-                'FO' => 'ingenierie_ip',
-                'FH' => 'support_fh',
-                'DEPLOIEMENT' => 'deploiement_telecom',
-                default => 'operator',
-            };
-            $resolvedDepartment = $user->getDepartment() ?: $defaultDepartmentByService;
+            [$stepCode, $title, $description] = $this->stepChain->firstStep($service);
+            $totalSteps = $this->stepChain->totalStepsFor($service);
+
+            $ticketSite->setTotalSteps($totalSteps);
+            $ticketSite->setCurrentStepIndex(0);
+            $ticketSite->setCurrentStepCode($stepCode);
+            $ticketSite->setStatus(TicketSite::STATUS_IN_PROGRESS);
 
             $task = new TicketTask();
             $task->setTicket($ticket);
+            $task->setTicketSite($ticketSite);
             $task->setAssignedTo($user);
-            $task->setTitle('Étude initiale ' . $service);
-            $task->setDescription('Analyser la demande et décider OK / NOK.');
+            $task->setTitle($title . ' — ' . $ticketSite->getSiteName());
+            $task->setDescription($description);
             $task->setServiceName($service);
-            $task->setDepartmentName($resolvedDepartment);
+            $task->setDepartmentName($entryDepartment ?? $user->getDepartment());
             $task->setStatus(TicketTask::STATUS_PENDING);
-            $task->setStepCode('initial_analysis');
+            $task->setStepCode($stepCode);
             $task->setStepOrder(1);
-            $task->setSiteData(array_map(fn($s) => $s->getId(), $serviceSites));
 
             $this->em->persist($task);
 
@@ -110,22 +101,48 @@ class WorkflowAutoAssigner
                 $ticket
             );
 
-            $assignedUsers[] = $user;
+            $assignedUsers[$user->getId()] = $user;
         }
 
         $this->em->flush();
 
-        return $assignedUsers;
+        return array_values($assignedUsers);
     }
 
-    private function findUserForService(string $service): ?User
+    private function pickUserForService(string $service, array &$cursor): ?User
     {
-        $users = $this->userRepo->findBy(['service' => $service]);
-        foreach ($users as $user) {
-            if (in_array('ROLE_USER', $user->getRoles(), true)) {
-                return $user;
-            }
+        $users = array_values(array_filter(
+            $this->userRepo->findBy(['service' => $service]),
+            fn(User $u) => in_array('ROLE_USER', $u->getRoles(), true)
+        ));
+
+        if (empty($users)) {
+            return null;
         }
-        return null;
+
+        $i = $cursor[$service] ?? 0;
+        $picked = $users[$i % count($users)];
+        $cursor[$service] = $i + 1;
+
+        return $picked;
+    }
+
+    private function pickUserForDepartment(string $department, array &$cursor): ?User
+    {
+        $users = array_values(array_filter(
+            $this->userRepo->findBy(['department' => $department]),
+            fn(User $u) => in_array('ROLE_USER', $u->getRoles(), true)
+        ));
+
+        if (empty($users)) {
+            return null;
+        }
+
+        $key = 'dept:' . $department;
+        $i = $cursor[$key] ?? 0;
+        $picked = $users[$i % count($users)];
+        $cursor[$key] = $i + 1;
+
+        return $picked;
     }
 }

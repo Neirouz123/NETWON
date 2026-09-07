@@ -96,7 +96,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         }
 
         $rows = $qb->getQuery()->getArrayResult();
-        return array_map(fn ($row) => $row['siteName'], $rows);
+        return array_map(fn($row) => $row['siteName'], $rows);
     }
 
     public function getStatsByService(): array
@@ -179,7 +179,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         }
         if ($search) {
             $qb->andWhere('LOWER(ps.siteName) LIKE :search OR LOWER(ps.pairedSiteName) LIKE :search')
-               ->setParameter('search', '%' . mb_strtolower(trim($search)) . '%');
+                ->setParameter('search', '%' . mb_strtolower(trim($search)) . '%');
         }
 
         $this->applyStatusFilter($qb, $statusFilter);
@@ -208,7 +208,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         ];
     }
 
-        private function applyStatusFilter($qb, ?string $statusFilter): void
+    private function applyStatusFilter($qb, ?string $statusFilter): void
     {
         if (!$statusFilter) {
             return;
@@ -220,58 +220,56 @@ class ProcessedSiteRepository extends ServiceEntityRepository
                 break;
             case 'SANS_TYPE':
                 $qb->andWhere('(ps.typeTrans IS NULL OR ps.typeTrans IN (:missingTypes))')
-                   ->setParameter('missingTypes', ['', 'NON_DEFINI', 'UNKNOWN', 'N/A', 'NA', '-']);
+                    ->setParameter('missingTypes', ['', 'NON_DEFINI', 'UNKNOWN', 'N/A', 'NA', '-']);
                 break;
             case 'SECURISE':
-                $qb->andWhere('ps.siteStatus = :statusVal')->setParameter('statusVal', 'SECURISE');
+                $qb->andWhere('UPPER(ps.status) = :statusVal')->setParameter('statusVal', 'OK');
                 break;
             case 'CRITIQUE':
-                $qb->andWhere('ps.siteStatus = :statusVal')->setParameter('statusVal', 'CRITIQUE');
+                $qb->andWhere('UPPER(ps.status) = :statusVal')->setParameter('statusVal', 'CRITIQUE');
                 break;
             case 'SURVEILLANCE':
-                $qb->andWhere('ps.siteStatus = :statusVal')->setParameter('statusVal', 'SURVEILLANCE');
+                $qb->andWhere('UPPER(ps.status) = :statusVal')->setParameter('statusVal', 'SOUS_OBSERVATION');
                 break;
             case 'CONGESTION':
-                $qb->andWhere('ps.status IN (:etats)')
-                   ->setParameter('etats', ['CONGESTION', 'CONGESTION(FDD)', 'CONGESTION(TDD)']);
+                $qb->andWhere('UPPER(ps.siteStatus) = :etatVal')->setParameter('etatVal', 'CONGESTION');
                 break;
             case 'BRIDAGE':
-                $qb->andWhere('ps.status = :etatVal')->setParameter('etatVal', 'BRIDAGE');
+                $qb->andWhere('UPPER(ps.siteStatus) = :etatVal')->setParameter('etatVal', 'BRIDAGE');
                 break;
             case 'RISQUE_DE_CONGESTION':
-                $qb->andWhere('ps.status = :etatVal')->setParameter('etatVal', 'RISQUE_DE_CONGESTION');
+                $qb->andWhere('UPPER(ps.siteStatus) = :etatVal')->setParameter('etatVal', 'RISQUE_DE_CONGESTION');
                 break;
-            case 'A_VERIFIER_CAPACITE':
-                $qb->andWhere('ps.status = :etatVal')->setParameter('etatVal', 'A_VERIFIER_CAPACITE');
+            case 'RISQUE_DE_BRIDAGE':
+                $qb->andWhere('UPPER(ps.siteStatus) = :etatVal')->setParameter('etatVal', 'RISQUE_DE_BRIDAGE');
                 break;
             case 'COUPURE_S1':
-                $qb->andWhere('ps.status = :etatVal')->setParameter('etatVal', 'COUPURE_S1');
+                $qb->andWhere('ps.s1FailDuration > 0');
                 break;
             case 'NON_EVALUE':
-                $qb->andWhere('(ps.siteStatus IS NULL OR ps.siteStatus = :statusVal)')->setParameter('statusVal', 'NON_EVALUE');
+                $qb->andWhere('(ps.siteStatus IS NULL OR UPPER(ps.siteStatus) = :statusVal)')->setParameter('statusVal', 'NON_EVALUE');
                 break;
             default:
                 break;
         }
     }
 
-        public static function getStatusFilterOptions(): array
+    public static function getStatusFilterOptions(): array
     {
         return [
             'SANS_CAPACITE' => 'Sans capacité',
-            'SANS_TYPE' => 'Sans type trans',
-            'SECURISE' => 'Sécurisé',
+            'SANS_TYPE' => 'Sans type de liaison',
+            'SECURISE' => 'OK / Sécurisé',
             'SURVEILLANCE' => 'Sous observation',
             'CRITIQUE' => 'Critique',
             'CONGESTION' => 'Congestion',
             'BRIDAGE' => 'Bridage',
             'RISQUE_DE_CONGESTION' => 'Risque de congestion',
-            'A_VERIFIER_CAPACITE' => 'À vérifier capacité',
+            'RISQUE_DE_BRIDAGE' => 'Risque de bridage',
             'COUPURE_S1' => 'Coupure S1',
             'NON_EVALUE' => 'Non évalué',
         ];
     }
-
     public function findForAdvancedExport(
         ?string $service,
         string $mode = 'all',
@@ -292,7 +290,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         }
         if ($siteSearch !== '') {
             $qb->andWhere('LOWER(ps.siteName) LIKE :siteSearch OR LOWER(ps.pairedSiteName) LIKE :siteSearch')
-               ->setParameter('siteSearch', '%' . mb_strtolower(trim($siteSearch)) . '%');
+                ->setParameter('siteSearch', '%' . mb_strtolower(trim($siteSearch)) . '%');
         }
         if ($dateFrom) {
             $qb->andWhere('ps.dateMax >= :dateFrom')->setParameter('dateFrom', new \DateTime($dateFrom . ' 00:00:00'));
@@ -503,7 +501,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         $stmt = $conn->prepare("SELECT DISTINCT site FROM trafic_historique WHERE site LIKE :prefixPattern ORDER BY site");
         $stmt->bindValue('prefixPattern', $prefix . '%');
         $rows = $stmt->executeQuery()->fetchAllAssociative();
-        return array_map(fn ($row) => $row['site'], $rows);
+        return array_map(fn($row) => $row['site'], $rows);
     }
 
     // ================== AUTRES MÉTHODES ==================
@@ -631,6 +629,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         $totalTrafficValues = array_column($totalSeries, 'y');
         $avgTrafficTotal = !empty($totalTrafficValues) ? round(array_sum($totalTrafficValues) / count($totalTrafficValues), 2) : 0.0;
         $maxTrafficTotal = !empty($totalTrafficValues) ? max($totalTrafficValues) : 0.0;
+        $availability = $mainSite && !$mainSite->isS1Down() ? 100.0 : ($mainSite ? 0.0 : null);
 
         return [
             'prefix' => $prefix,
@@ -648,6 +647,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
             'stats' => [
                 'avgTrafficTotal' => $avgTrafficTotal,
                 'maxTrafficTotal' => round((float) $maxTrafficTotal, 2),
+                'availability' => $availability,
             ],
             'dataRange' => [
                 'start' => $start->format('Y-m-d H:i:s'),
@@ -673,7 +673,7 @@ class ProcessedSiteRepository extends ServiceEntityRepository
         }
         if ($search !== '') {
             $qb->andWhere('LOWER(ps.siteName) LIKE :search OR LOWER(ps.pairedSiteName) LIKE :search')
-               ->setParameter('search', '%' . mb_strtolower(trim($search)) . '%');
+                ->setParameter('search', '%' . mb_strtolower(trim($search)) . '%');
         }
 
         return $qb
@@ -720,15 +720,15 @@ class ProcessedSiteRepository extends ServiceEntityRepository
      * date exacte) issues de site_alert, alimentée par le pipeline Python
      * (analyser_etats_et_alertes dans traitement.py).
      */
-public function findRecentSiteAlerts(?string $service = null, int $limit = 100): array
-{
-    $conn = $this->getEntityManager()->getConnection();
+    public function findRecentSiteAlerts(?string $service = null, int $limit = 100): array
+    {
+        $conn = $this->getEntityManager()->getConnection();
 
-    if (!$this->tableExists($conn, 'site_alert')) {
-        return [];
-    }
+        if (!$this->tableExists($conn, 'site_alert')) {
+            return [];
+        }
 
-    $sql = "
+        $sql = "
         SELECT sa.id, sa.site, sa.etat, sa.trafic_j, sa.capacite_mbps,
                sa.taux_utilisation,
                sa.type_trans, sa.classification, sa.message, sa.date_alerte,
@@ -737,21 +737,21 @@ public function findRecentSiteAlerts(?string $service = null, int $limit = 100):
         LEFT JOIN processed_site ps ON ps.site_name = sa.site
         WHERE sa.type_trans != 'IA_ANOMALY'
     ";
-    $params = [];
-    if ($service) {
-        $sql .= " AND ps.service = :service";
-        $params['service'] = $this->normalizeService($service);
-    }
-    $sql .= " ORDER BY sa.date_alerte DESC LIMIT :limit";
+        $params = [];
+        if ($service) {
+            $sql .= " AND ps.service = :service";
+            $params['service'] = $this->normalizeService($service);
+        }
+        $sql .= " ORDER BY sa.date_alerte DESC LIMIT :limit";
 
-    $stmt = $conn->prepare($sql);
-    foreach ($params as $key => $value) {
-        $stmt->bindValue($key, $value);
-    }
-    $stmt->bindValue('limit', $limit, ParameterType::INTEGER);
+        $stmt = $conn->prepare($sql);
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
+        }
+        $stmt->bindValue('limit', $limit, ParameterType::INTEGER);
 
-    return $stmt->executeQuery()->fetchAllAssociative();
-}
+        return $stmt->executeQuery()->fetchAllAssociative();
+    }
 
     /**
      * ✅ Compte les alertes site_alert des 7 derniers jours par catégorie
@@ -761,8 +761,11 @@ public function findRecentSiteAlerts(?string $service = null, int $limit = 100):
     public function getSiteAlertCounts(?string $service = null): array
     {
         $counts = [
-            'CONGESTION' => 0, 'BRIDAGE' => 0,
-            'RISQUE_DE_CONGESTION' => 0, 'SANS_TYPE' => 0, 'A_VERIFIER_CAPACITE' => 0,
+            'CONGESTION' => 0,
+            'BRIDAGE' => 0,
+            'RISQUE_DE_CONGESTION' => 0,
+            'SANS_TYPE' => 0,
+            'A_VERIFIER_CAPACITE' => 0,
         ];
 
         $conn = $this->getEntityManager()->getConnection();
@@ -822,38 +825,38 @@ public function findRecentSiteAlerts(?string $service = null, int $limit = 100):
         return $exists;
     }
     public function findClassificationsForSiteNames(array $siteNames): array
-{
-    if (empty($siteNames)) {
-        return [];
-    }
-
-    // Découpage en lots pour éviter une clause IN() trop volumineuse (limite de paramètres SQL)
-    $map = [];
-    foreach (array_chunk($siteNames, 500) as $chunk) {
-        $rows = $this->createQueryBuilder('s')
-            ->select('s.siteName as siteName', 's.classification as classification')
-            ->where('s.siteName IN (:names)')
-            ->setParameter('names', $chunk)
-            ->getQuery()
-            ->getArrayResult();
-
-        foreach ($rows as $r) {
-            $map[$r['siteName']] = $r['classification'];
+    {
+        if (empty($siteNames)) {
+            return [];
         }
+
+        // Découpage en lots pour éviter une clause IN() trop volumineuse (limite de paramètres SQL)
+        $map = [];
+        foreach (array_chunk($siteNames, 500) as $chunk) {
+            $rows = $this->createQueryBuilder('s')
+                ->select('s.siteName as siteName', 's.classification as classification')
+                ->where('s.siteName IN (:names)')
+                ->setParameter('names', $chunk)
+                ->getQuery()
+                ->getArrayResult();
+
+            foreach ($rows as $r) {
+                $map[$r['siteName']] = $r['classification'];
+            }
+        }
+        return $map;
     }
-    return $map;
-}
 
-/**
- * Retourne les périodes hebdomadaires disponibles dans trafic_historique,
- * pour peupler le filtre de période sur la page d'export.
- * Format attendu par le template : period.start, period.end, period.label
- */
-public function getAvailableImportWeeks(): array
-{
-    $conn = $this->getEntityManager()->getConnection();
+    /**
+     * Retourne les périodes hebdomadaires disponibles dans trafic_historique,
+     * pour peupler le filtre de période sur la page d'export.
+     * Format attendu par le template : period.start, period.end, period.label
+     */
+    public function getAvailableImportWeeks(): array
+    {
+        $conn = $this->getEntityManager()->getConnection();
 
-    $sql = "
+        $sql = "
         SELECT DISTINCT
             DATE_TRUNC('week', COALESCE(date_heure, date_jour::timestamp)) AS week_start
         FROM trafic_historique
@@ -862,123 +865,129 @@ public function getAvailableImportWeeks(): array
         LIMIT 26
     ";
 
-    $rows = $conn->fetchAllAssociative($sql);
+        $rows = $conn->fetchAllAssociative($sql);
 
-    $weeks = [];
-    foreach ($rows as $row) {
-        if (!$row['week_start']) {
-            continue;
+        $weeks = [];
+        foreach ($rows as $row) {
+            if (!$row['week_start']) {
+                continue;
+            }
+            $start = new \DateTime($row['week_start']);
+            $end = (clone $start)->modify('+6 days');
+            $weeks[] = [
+                'start' => $start->format('Y-m-d'),
+                'end' => $end->format('Y-m-d'),
+                'label' => 'Semaine du ' . $start->format('d/m/Y') . ' au ' . $end->format('d/m/Y'),
+            ];
         }
-        $start = new \DateTime($row['week_start']);
-        $end = (clone $start)->modify('+6 days');
-        $weeks[] = [
-            'start' => $start->format('Y-m-d'),
-            'end' => $end->format('Y-m-d'),
-            'label' => 'Semaine du ' . $start->format('d/m/Y') . ' au ' . $end->format('d/m/Y'),
-        ];
+
+        return $weeks;
     }
 
-    return $weeks;
-}
+    /**
+     * Retourne les sites correspondant aux filtres pour l'export CSV,
+     * avec les mêmes filtres que findSitesPaginated() mais sans pagination
+     * (toutes les lignes filtrées sont retournées).
+     */
+    public function findSitesForExport(
+        ?string $service,
+        ?string $classification,
+        ?string $status,
+        ?string $search
+    ): array {
+        $qb = $this->createQueryBuilder('s');
 
-/**
- * Retourne les sites correspondant aux filtres pour l'export CSV,
- * avec les mêmes filtres que findSitesPaginated() mais sans pagination
- * (toutes les lignes filtrées sont retournées).
- */
-public function findSitesForExport(
-    ?string $service,
-    ?string $classification,
-    ?string $status,
-    ?string $search
-): array {
-    $qb = $this->createQueryBuilder('s');
+        if ($service) {
+            $qb->andWhere('s.service = :service')->setParameter('service', $service);
+        }
+        if ($classification) {
+            $qb->andWhere('s.classification = :classification')->setParameter('classification', $classification);
+        }
+        if ($status) {
+            $status = strtoupper($status);
+            if ($status === 'SECURISE') $status = 'OK';
+            if ($status === 'SURVEILLANCE') $status = 'SOUS_OBSERVATION';
+            if (in_array($status, ['CRITIQUE', 'SOUS_OBSERVATION', 'OK'], true)) {
+                $qb->andWhere('UPPER(s.status) = :status')->setParameter('status', $status);
+            } elseif ($status === 'CONGESTION') {
+                $qb->andWhere('UPPER(s.siteStatus) IN (:statusValues)')
+                    ->setParameter('statusValues', ['CONGESTION', 'CONGESTION(FDD)', 'CONGESTION(TDD)']);
+            } else {
+                $qb->andWhere('UPPER(s.siteStatus) = :status')->setParameter('status', $status);
+            }
+        }
+        if ($search) {
+            $qb->andWhere('LOWER(s.siteName) LIKE :search')
+                ->setParameter('search', '%' . mb_strtolower(trim($search)) . '%');
+        }
 
-    if ($service) {
-        $qb->andWhere('s.service = :service')->setParameter('service', $service);
+        return $qb->orderBy('s.siteName', 'ASC')->getQuery()->getResult();
     }
-    if ($classification) {
-        $qb->andWhere('s.classification = :classification')->setParameter('classification', $classification);
+    /**
+     * Compte les alertes par état pour les sites d'un service donné, sur les N derniers jours
+     */
+    public function countByEtatForService(?string $service, int $days = 7): array
+    {
+        $date = new \DateTime("-{$days} days");
+        $qb = $this->createQueryBuilder('a')
+            ->select('a.etat, COUNT(a.id) as count')
+            ->where('a.date_alerte >= :date')
+            ->setParameter('date', $date);
+
+        if ($service) {
+            // Jointure avec processed_site pour filtrer par service
+            $qb->innerJoin('App\Entity\ProcessedSite', 'ps', 'WITH', 'ps.siteName = a.site')
+                ->andWhere('ps.service = :service')
+                ->setParameter('service', $service);
+        }
+
+        $qb->groupBy('a.etat');
+
+        $results = $qb->getQuery()->getResult();
+        $counts = [];
+        foreach ($results as $row) {
+            $counts[$row['etat']] = (int) $row['count'];
+        }
+        return $counts;
     }
-    if ($status) {
-        $qb->andWhere('UPPER(s.siteStatus) = :status')->setParameter('status', strtoupper($status));
-    }
-    if ($search) {
-        $qb->andWhere('LOWER(s.siteName) LIKE :search')
-            ->setParameter('search', '%' . mb_strtolower(trim($search)) . '%');
-    }
+    /**
+     * Compte les sites ayant un statut donné pour un service donné (ou tous si null).
+     */
+    public function countBySiteStatus(string $status, ?string $service = null): int
+    {
+        $qb = $this->createQueryBuilder('s')
+            ->select('COUNT(s.id)')
+            ->where('s.status = :status')
+            ->setParameter('status', in_array(strtoupper($status), ['SECURISE', 'SECURE'], true) ? 'OK' : (strtoupper($status) === 'SURVEILLANCE' ? 'SOUS_OBSERVATION' : strtoupper($status)));
 
-    return $qb->orderBy('s.siteName', 'ASC')->getQuery()->getResult();
-}
-/**
- * Compte les sites ayant un statut donné (ex: 'CRITIQUE', 'SURVEILLANCE', 'SECURISE')
- */
-/**
- * Compte les alertes par état pour les sites d'un service donné, sur les N derniers jours
- */
-public function countByEtatForService(?string $service, int $days = 7): array
-{
-    $date = new \DateTime("-{$days} days");
-    $qb = $this->createQueryBuilder('a')
-        ->select('a.etat, COUNT(a.id) as count')
-        ->where('a.date_alerte >= :date')
-        ->setParameter('date', $date);
+        if ($service) {
+            $qb->andWhere('s.service = :service')
+                ->setParameter('service', $this->normalizeService($service));
+        }
 
-    if ($service) {
-        // Jointure avec processed_site pour filtrer par service
-        $qb->innerJoin('App\Entity\ProcessedSite', 'ps', 'WITH', 'ps.siteName = a.site')
-           ->andWhere('ps.service = :service')
-           ->setParameter('service', $service);
-    }
-
-    $qb->groupBy('a.etat');
-
-    $results = $qb->getQuery()->getResult();
-    $counts = [];
-    foreach ($results as $row) {
-        $counts[$row['etat']] = (int) $row['count'];
-    }
-    return $counts;
-}
-/**
- * Compte les sites ayant un statut donné (ex: 'CRITIQUE', 'SURVEILLANCE', 'SECURISE')
- * pour un service donné (ou tous si null).
- */
-public function countBySiteStatus(string $status, ?string $service = null): int
-{
-    $qb = $this->createQueryBuilder('s')
-        ->select('COUNT(s.id)')
-        ->where('s.siteStatus = :status')
-        ->setParameter('status', $status);
-
-    if ($service) {
-        $qb->andWhere('s.service = :service')
-           ->setParameter('service', $this->normalizeService($service));
-    }
-
-    return (int) $qb->getQuery()->getSingleScalarResult();
-}
-
-
-/**
- * Récupère les données de trafic (max_speed) pour une liste de noms de sites,
- * sur les N derniers jours, en une seule requête GROUP BY site + date.
- * Retourne un tableau associatif [ siteName => ['labels' => [...], 'values' => [...]] ]
- */
-public function getTrafficHistoryBatch(array $siteNames, int $days = 30): array
-{
-    if (empty($siteNames)) {
-        return [];
+        return (int) $qb->getQuery()->getSingleScalarResult();
     }
 
-    $conn = $this->getEntityManager()->getConnection();
 
-    $maxDateSql = "SELECT MAX(date_heure) FROM trafic_historique";
-    $maxDateResult = $conn->fetchOne($maxDateSql);
-    $maxDate = $maxDateResult ? new \DateTime($maxDateResult) : new \DateTime();
-    $startDate = (clone $maxDate)->modify("-$days days");
+    /**
+     * Récupère les données de trafic (max_speed) pour une liste de noms de sites,
+     * sur les N derniers jours, en une seule requête GROUP BY site + date.
+     * Retourne un tableau associatif [ siteName => ['labels' => [...], 'values' => [...]] ]
+     */
+    public function getTrafficHistoryBatch(array $siteNames, int $days = 30): array
+    {
+        if (empty($siteNames)) {
+            return [];
+        }
 
-    $sql = "
+        $conn = $this->getEntityManager()->getConnection();
+
+        $maxDateSql = "SELECT MAX(date_heure) FROM trafic_historique";
+        $maxDateResult = $conn->fetchOne($maxDateSql);
+        $maxDate = $maxDateResult ? new \DateTime($maxDateResult) : new \DateTime();
+        $startDate = (clone $maxDate)->modify("-$days days");
+
+        $sql = "
         SELECT site, date_heure, max_speed
         FROM trafic_historique
         WHERE site IN (:sites)
@@ -987,63 +996,63 @@ public function getTrafficHistoryBatch(array $siteNames, int $days = 30): array
         ORDER BY site, date_heure ASC
     ";
 
-    // ✅ Utilisation des bons types : ArrayParameterType::STRING pour le tableau,
-    // et ParameterType::STRING pour les chaînes (ou on peut les omettre).
-    $stmt = $conn->executeQuery(
-        $sql,
-        [
-            'sites' => $siteNames,
-            'startDate' => $startDate->format('Y-m-d H:i:s'),
-            'endDate' => $maxDate->format('Y-m-d H:i:s'),
-        ],
-        [
-            'sites' => ArrayParameterType::STRING,
-            // Les autres paramètres sont automatiquement traités comme des chaînes
-            // On peut donc ne pas spécifier de type.
-        ]
-    );
+        // ✅ Utilisation des bons types : ArrayParameterType::STRING pour le tableau,
+        // et ParameterType::STRING pour les chaînes (ou on peut les omettre).
+        $stmt = $conn->executeQuery(
+            $sql,
+            [
+                'sites' => $siteNames,
+                'startDate' => $startDate->format('Y-m-d H:i:s'),
+                'endDate' => $maxDate->format('Y-m-d H:i:s'),
+            ],
+            [
+                'sites' => ArrayParameterType::STRING,
+                // Les autres paramètres sont automatiquement traités comme des chaînes
+                // On peut donc ne pas spécifier de type.
+            ]
+        );
 
-    $rows = $stmt->fetchAllAssociative();
+        $rows = $stmt->fetchAllAssociative();
 
-    $result = [];
-    foreach ($rows as $row) {
-        $site = $row['site'];
-        if (!isset($result[$site])) {
-            $result[$site] = ['labels' => [], 'values' => []];
+        $result = [];
+        foreach ($rows as $row) {
+            $site = $row['site'];
+            if (!isset($result[$site])) {
+                $result[$site] = ['labels' => [], 'values' => []];
+            }
+            $timestamp = strtotime($row['date_heure']);
+            if ($timestamp === false) continue;
+            $result[$site]['labels'][] = date('d/m H:i', $timestamp);
+            $result[$site]['values'][] = (float) $row['max_speed'];
         }
-        $timestamp = strtotime($row['date_heure']);
-        if ($timestamp === false) continue;
-        $result[$site]['labels'][] = date('d/m H:i', $timestamp);
-        $result[$site]['values'][] = (float) $row['max_speed'];
+
+        return $result;
     }
+    // src/Repository/ProcessedSiteRepository.php
 
-    return $result;
-}
-// src/Repository/ProcessedSiteRepository.php
+    // Ajoutez la méthode suivante (si ce n'est pas déjà fait) :
+    public function getTrafficHistoryForPrefixes(array $prefixes, int $days = 30): array
+    {
+        if (empty($prefixes)) {
+            return [];
+        }
 
-// Ajoutez la méthode suivante (si ce n'est pas déjà fait) :
-public function getTrafficHistoryForPrefixes(array $prefixes, int $days = 30): array
-{
-    if (empty($prefixes)) {
-        return [];
-    }
+        $conn = $this->getEntityManager()->getConnection();
 
-    $conn = $this->getEntityManager()->getConnection();
+        $conditions = [];
+        $params = [];
+        foreach ($prefixes as $i => $prefix) {
+            $conditions[] = "site LIKE :prefix_$i";
+            $params["prefix_$i"] = $prefix . '%';
+        }
+        $whereClause = implode(' OR ', $conditions);
 
-    $conditions = [];
-    $params = [];
-    foreach ($prefixes as $i => $prefix) {
-        $conditions[] = "site LIKE :prefix_$i";
-        $params["prefix_$i"] = $prefix . '%';
-    }
-    $whereClause = implode(' OR ', $conditions);
+        $maxDateSql = "SELECT MAX(date_heure) FROM trafic_historique";
+        $maxDateResult = $conn->fetchOne($maxDateSql);
+        $maxDate = $maxDateResult ? new \DateTime($maxDateResult) : new \DateTime();
+        $startDate = (clone $maxDate)->modify("-$days days");
 
-    $maxDateSql = "SELECT MAX(date_heure) FROM trafic_historique";
-    $maxDateResult = $conn->fetchOne($maxDateSql);
-    $maxDate = $maxDateResult ? new \DateTime($maxDateResult) : new \DateTime();
-    $startDate = (clone $maxDate)->modify("-$days days");
-
-    $sql = "
+        $sql = "
         SELECT site, date_heure, max_speed
         FROM trafic_historique
         WHERE ($whereClause)
@@ -1052,56 +1061,54 @@ public function getTrafficHistoryForPrefixes(array $prefixes, int $days = 30): a
         ORDER BY site, date_heure ASC
     ";
 
-    $stmt = $conn->prepare($sql);
-    foreach ($params as $key => $value) {
-        $stmt->bindValue($key, $value);
-    }
-    $stmt->bindValue('startDate', $startDate->format('Y-m-d H:i:s'));
-    $stmt->bindValue('endDate', $maxDate->format('Y-m-d H:i:s'));
-    $rows = $stmt->executeQuery()->fetchAllAssociative();
-
-    $rawToPrefix = [];
-    foreach ($prefixes as $prefix) {
-        $rawNames = $this->findDistinctRawSiteNamesForPrefix($prefix);
-        foreach ($rawNames as $raw) {
-            $rawToPrefix[$raw] = $prefix;
+        $stmt = $conn->prepare($sql);
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
         }
-    }
+        $stmt->bindValue('startDate', $startDate->format('Y-m-d H:i:s'));
+        $stmt->bindValue('endDate', $maxDate->format('Y-m-d H:i:s'));
+        $rows = $stmt->executeQuery()->fetchAllAssociative();
 
-    $grouped = [];
-    foreach ($rows as $row) {
-        $rawSite = $row['site'];
-        $prefix = $rawToPrefix[$rawSite] ?? null;
-        if (!$prefix) continue;
-        $timestamp = strtotime($row['date_heure']);
-        if ($timestamp === false) continue;
-        $value = (float) $row['max_speed'];
-        if (!isset($grouped[$prefix])) $grouped[$prefix] = [];
-        if (!isset($grouped[$prefix][$timestamp])) {
-            $grouped[$prefix][$timestamp] = $value;
-        } else {
-            $grouped[$prefix][$timestamp] = max($grouped[$prefix][$timestamp], $value);
+        $rawToPrefix = [];
+        foreach ($prefixes as $prefix) {
+            $rawNames = $this->findDistinctRawSiteNamesForPrefix($prefix);
+            foreach ($rawNames as $raw) {
+                $rawToPrefix[$raw] = $prefix;
+            }
         }
-    }
 
-    $result = [];
-    foreach ($grouped as $prefix => $data) {
-        ksort($data);
-        $labels = [];
-        $values = [];
-        foreach ($data as $ts => $val) {
-            $labels[] = date('d/m H:i', $ts);
-            $values[] = round($val, 2);
+        $grouped = [];
+        foreach ($rows as $row) {
+            $rawSite = $row['site'];
+            $prefix = $rawToPrefix[$rawSite] ?? null;
+            if (!$prefix) continue;
+            $timestamp = strtotime($row['date_heure']);
+            if ($timestamp === false) continue;
+            $value = (float) $row['max_speed'];
+            if (!isset($grouped[$prefix])) $grouped[$prefix] = [];
+            if (!isset($grouped[$prefix][$timestamp])) {
+                $grouped[$prefix][$timestamp] = $value;
+            } else {
+                $grouped[$prefix][$timestamp] = max($grouped[$prefix][$timestamp], $value);
+            }
         }
-        $result[$prefix] = ['labels' => $labels, 'values' => $values];
-    }
-    foreach ($prefixes as $prefix) {
-        if (!isset($result[$prefix])) {
-            $result[$prefix] = ['labels' => [], 'values' => []];
+
+        $result = [];
+        foreach ($grouped as $prefix => $data) {
+            ksort($data);
+            $labels = [];
+            $values = [];
+            foreach ($data as $ts => $val) {
+                $labels[] = date('d/m H:i', $ts);
+                $values[] = round($val, 2);
+            }
+            $result[$prefix] = ['labels' => $labels, 'values' => $values];
         }
+        foreach ($prefixes as $prefix) {
+            if (!isset($result[$prefix])) {
+                $result[$prefix] = ['labels' => [], 'values' => []];
+            }
+        }
+        return $result;
     }
-    return $result;
-}
-
-
 }

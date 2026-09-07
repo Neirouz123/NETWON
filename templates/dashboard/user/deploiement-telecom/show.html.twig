@@ -99,42 +99,64 @@
             <a href="{{ path('user_deploiement_index') }}" class="btn btn-secondary">Retour à mes tâches</a>
         </div>
 
+    {# ========== CAS: Décision MLO initiale (upgrade hard FH) ========== #}
+    {% elseif isFhMlo and task.status not in ['done', 'completed'] %}
+        <div class="card">
+            <h2 class="section-title">⚙️ Décision MLO {% if selectedSite %}pour <strong>{{ selectedSite.siteName }}</strong>{% endif %}</h2>
+            <div class="info-box">
+                <strong>📋 Upgrade hard FH : valider le MLO.</strong> Selon la décision, le site sera transmis
+                à Ingénierie Capillaire (OK) ou à Ingénierie IP pour le LLD port routeur (NOK).
+            </div>
+            <form method="post" action="{{ path('user_deploiement_mlo_decision', {id: task.id}) }}">
+                <div class="form-group">
+                    <label class="form-label">Décision MLO</label>
+                    <select name="mlo_decision" class="form-control" required>
+                        <option value="OK">✅ OK — MLO réalisé avec succès</option>
+                        <option value="NOK">❌ NOK — Problème MLO</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Commentaire</label>
+                    <textarea name="comment" rows="3" class="form-control"></textarea>
+                </div>
+                <button type="submit" class="btn-success">✅ Valider la décision MLO</button>
+            </form>
+        </div>
+
+    {# ========== CAS: Validation MLO finale (après retour du LLD Ingénierie IP) ========== #}
+    {% elseif isFhMloValidation and task.status not in ['done', 'completed'] %}
+        <div class="card">
+            <h2 class="section-title">⚙️ Validation MLO finale {% if selectedSite %}pour <strong>{{ selectedSite.siteName }}</strong>{% endif %}</h2>
+            <div class="info-box">
+                <strong>📋 Le LLD port routeur a été traité par Ingénierie IP.</strong> Validez le MLO pour clore le site
+                (il passera ensuite en attente de validation superuser).
+            </div>
+            <form method="post" action="{{ path('user_deploiement_mlo_validation', {id: task.id}) }}">
+                <div class="form-group">
+                    <label class="form-label">Commentaire</label>
+                    <textarea name="comment" rows="3" class="form-control"></textarea>
+                </div>
+                <button type="submit" class="btn-success">✅ Valider le MLO</button>
+            </form>
+        </div>
+
     {# ========== CAS: Planification standard ========== #}
     {% elseif isPlanification and selectedSite and not selectedDecision and task.status not in ['done', 'completed'] %}
-        {# Si c'est un hard upgrade FH, on affiche le formulaire MLO #}
-        {% if isHardUpgrade %}
-            <div class="card">
-                <h2 class="section-title">⚙️ Validation MLO pour <strong>{{ selectedSite.siteName }}</strong></h2>
-                <div class="info-box">
-                    <strong>📋 Valider le MLO pour l'upgrade Hard FH.</strong>
-                </div>
-                <form method="post" action="{{ path('user_deploiement_site_decision', {id: task.id, siteId: selectedSite.id}) }}">
-                    <div class="form-group">
-                        <label class="form-label">Décision MLO</label>
-                        <select name="mlo_decision" class="form-control" required>
-                            <option value="OK">✅ OK — MLO réalisé avec succès</option>
-                            <option value="NOK">❌ NOK — Problème MLO</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Commentaire</label>
-                        <textarea name="comment" rows="3" class="form-control"></textarea>
-                    </div>
-                    <button type="submit" class="btn-success">✅ Valider la décision MLO</button>
-                </form>
+        <div class="card">
+            <h2 class="section-title">⚙️ Planification pour <strong>{{ selectedSite.siteName }}</strong></h2>
+            <div class="info-box">
+                <strong>📋 Planifier l'intervention et coordonner avec les supports.</strong>
             </div>
-        {% else %}
-            {# Planification standard (FO, FH soft, raccordement, etc.) #}
-            <div class="card">
-                <h2 class="section-title">⚙️ Planification pour <strong>{{ selectedSite.siteName }}</strong></h2>
-                <div class="info-box">
-                    <strong>📋 Planifier l'intervention et coordonner avec les supports.</strong>
+            <form method="post" action="{{ path('user_deploiement_site_decision', {id: task.id, siteId: selectedSite.id}) }}">
+                <div class="form-group">
+                    <label class="form-label">Date de planification</label>
+                    <input type="date" name="planification" class="form-control" required>
                 </div>
-                <form method="post" action="{{ path('user_deploiement_site_decision', {id: task.id, siteId: selectedSite.id}) }}">
-                    <div class="form-group">
-                        <label class="form-label">Date de planification</label>
-                        <input type="date" name="planification" class="form-control" required>
+                {% if isFoPlanning %}
+                    <div class="info-box">
+                        <strong>📡 Supports Radio et Backhaul</strong> seront automatiquement notifiés après l’enregistrement de la planification FO.
                     </div>
+                {% else %}
                     <div class="form-group">
                         <label class="form-label">Coordination avec les supports</label>
                         <div class="checkbox-group">
@@ -143,14 +165,14 @@
                         </div>
                         <p class="text-xs text-gray-500">Cochez les supports concernés, puis validez pour leur transmettre la demande.</p>
                     </div>
-                    <div class="form-group">
-                        <label class="form-label">Commentaire</label>
-                        <textarea name="comment" rows="3" class="form-control"></textarea>
-                    </div>
-                    <button type="submit" class="btn-success">✅ Envoyer aux supports</button>
-                </form>
-            </div>
-        {% endif %}
+                {% endif %}
+                <div class="form-group">
+                    <label class="form-label">Commentaire</label>
+                    <textarea name="comment" rows="3" class="form-control"></textarea>
+                </div>
+                <button type="submit" class="btn-success">✅ {{ isFoPlanning ? 'Planifier et notifier les supports' : 'Envoyer aux supports' }}</button>
+            </form>
+        </div>
 
     {# ========== CAS: Exécution ========== #}
     {% elseif isExecution and selectedSite and not selectedDecision and task.status not in ['done', 'completed'] %}

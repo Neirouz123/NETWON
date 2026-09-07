@@ -86,28 +86,65 @@ class UserSharedController extends AbstractController
         ]);
     }
 
-    #[Route('/task/{id}', name: 'user_shared_task_show', methods: ['GET'])]
-    public function show(TicketTask $task): Response
-    {
-        $this->denyAccessUnlessGranted('ROLE_USER');
-        /** @var User $user */
-        $user = $this->getUser();
+#[Route('/task/{id}', name: 'user_shared_task_show', methods: ['GET'])]
+public function show(TicketTask $task): Response
+{
+    $this->denyAccessUnlessGranted('ROLE_USER');
+    /** @var User $user */
+    $user = $this->getUser();
 
-        if ($task->getAssignedTo()?->getId() !== $user->getId()) {
-            throw $this->createAccessDeniedException('Vous n\'êtes pas assigné à cette tâche.');
-        }
-
-        $ticket = $task->getTicket();
-        $sites = $ticket->getTicketSites()->toArray();
-
-        return $this->render('dashboard/user/shared/show.html.twig', [
-            'task' => $task,
-            'ticket' => $ticket,
-            'sites' => $sites,
-        ]);
+    if ($task->getAssignedTo()?->getId() !== $user->getId()) {
+        throw $this->createAccessDeniedException('Vous n\'êtes pas assigné à cette tâche.');
     }
 
-    #[Route('/task/{id}/complete', name: 'user_shared_task_complete', methods: ['POST'])]
+    $ticket = $task->getTicket();
+    $sites = $this->getSitesForTask($task);
+    $siteNames = array_map(fn($s) => $s->getSiteName(), $sites);
+
+    // Filtrer l'historique pour ne garder que les entrées concernant les sites de la tâche
+    $allHistory = $ticket->getHistory()->toArray();
+    $filteredHistory = array_filter($allHistory, function ($entry) use ($siteNames) {
+        // Si l'entrée a un site, on vérifie qu'il est dans la liste des sites de la tâche
+        if ($entry->getSite()) {
+            return in_array($entry->getSite(), $siteNames);
+        }
+        // Si l'entrée n'a pas de site, on la garde (considérée comme générale)
+        return true;
+    });
+
+    return $this->render('dashboard/user/shared/show.html.twig', [
+        'task' => $task,
+        'ticket' => $ticket,
+        'sites' => $sites,
+        'history' => array_values($filteredHistory), // réindexer
+    ]);
+}
+
+/**
+ * Retourne la liste des sites concernés par cette tâche.
+ */
+// src/Controller/UserSharedController.php
+
+private function getSitesForTask(TicketTask $task): array
+{
+    if ($task->getTicketSite()) {
+        return [$task->getTicketSite()];
+    }
+    $ticket = $task->getTicket();
+    if (!$ticket) {
+        return [];
+    }
+    $siteIds = $task->getSiteData() ?? [];
+    if (!empty($siteIds)) {
+        return array_values(array_filter(
+            $ticket->getTicketSites()->toArray(),
+            fn($site) => in_array($site->getId(), $siteIds, true)
+        ));
+    }
+    return $ticket->getTicketSites()->toArray();
+}
+
+#[Route('/task/{id}/complete', name: 'user_shared_task_complete', methods: ['POST'])]
     public function complete(TicketTask $task, Request $request): Response
     {
         $this->denyAccessUnlessGranted('ROLE_USER');
@@ -144,15 +181,11 @@ class UserSharedController extends AbstractController
         ]));
 
         // 3. Créer la tâche de validation superuser (sans flush pour le moment)
-        $this->foWorkflowService->createSuperuserValidationTask($ticket, $task);
-        $this->em->flush(); // Persiste la tâche de validation
-
-        // 4. Rafraîchir la progression (peut changer le statut)
         $this->ticketWorkflowService->refreshTicketProgress($ticket);
 
-        // 5. Forcer le statut du ticket à "waiting_superuser"
-        $ticket->setStatus('waiting_superuser');
-        $ticket->setCurrentStep($ticket->getTotalSteps());
+        if ($ticket->getStatus() === 'waiting_superuser') {
+            $this->foWorkflowService->createSuperuserValidationTask($ticket, $task);
+        }
 
         // 6. Historique
         $this->ticketWorkflowService->addHistory(
@@ -165,12 +198,11 @@ class UserSharedController extends AbstractController
         // 7. Envoyer l'email à l'intervenant
         $this->sendIntervenantEmail($intervenantEmail, $ticket, $task, $siteEtat, $actionProposee);
 
-        // 8. Notifier les superusers
-        $this->notificationService->notifyWorkflowReadyForSuperuser($ticket);
-
         $this->em->flush();
 
-        $this->addFlash('success', 'La tâche a été terminée. L\'intervenant a été notifié et les superusers sont informés.');
+        $this->addFlash('success', $ticket->getStatus() === 'waiting_superuser'
+            ? 'La tâche a été terminée. Les superusers peuvent maintenant valider le workflow.'
+            : 'La tâche a été terminée. Le workflow reste en cours pour les autres sites ou étapes.');
 
         return $this->redirectToRoute('user_shared_tasks');
     }

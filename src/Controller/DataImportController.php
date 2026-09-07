@@ -1,5 +1,5 @@
 <?php
-
+// src/Controller/DataImportController.php
 namespace App\Controller;
 
 use App\Entity\ProcessedImport;
@@ -25,7 +25,8 @@ class DataImportController extends AbstractController
         EntityManagerInterface $em,
         ProcessedSiteRepository $processedSiteRepository,
         SiteAlertRepository $siteAlertRepository,
-        NotificationService $notificationService
+        NotificationService $notificationService,
+        SiteStateCalculatorService $stateCalculator
     ): Response {
         $this->denyAccessUnlessGranted('ROLE_USER');
         $user = $this->getUser();
@@ -33,9 +34,8 @@ class DataImportController extends AbstractController
         $trafic = $request->files->get('trafic') ?? $request->files->get('trafic_file');
         $port = $request->files->get('port') ?? $request->files->get('port_file');
         $liaison = $request->files->get('liaison') ?? $request->files->get('type_liaison_file');
-        $gps = $request->files->get('gps') ?? $request->files->get('gps_file');
 
-        if (!$this->validateFiles($trafic, $port, $liaison)) {
+        if (!$this->validateFiles($trafic)) {
             $this->addFlash('error', 'Le fichier trafic est obligatoire.');
             return $this->redirectToRoute('dashboard_import');
         }
@@ -44,7 +44,7 @@ class DataImportController extends AbstractController
         $liaisonFileName = $liaison ? $liaison->getClientOriginalName() : '';
 
         try {
-            $data = $pythonApiClient->processFiles($trafic, $port, $liaison, $gps);
+            $data = $pythonApiClient->processFiles($trafic, $port, $liaison, null);
             if (($data['status'] ?? '') !== 'success') {
                 throw new \Exception($data['message'] ?? 'Erreur inconnue du service Python');
             }
@@ -52,7 +52,7 @@ class DataImportController extends AbstractController
             $stats = $this->saveProcessedData(
                 $data, $user, $trafic->getClientOriginalName(),
                 $portFileName, $liaisonFileName, $em, $processedSiteRepository,
-                $siteAlertRepository, $notificationService
+                $siteAlertRepository, $notificationService, $stateCalculator
             );
 
             $this->addFlash('success', sprintf(
@@ -73,7 +73,8 @@ class DataImportController extends AbstractController
         EntityManagerInterface $em,
         ProcessedSiteRepository $processedSiteRepository,
         SiteAlertRepository $siteAlertRepository,
-        NotificationService $notificationService
+        NotificationService $notificationService,
+        SiteStateCalculatorService $stateCalculator
     ): Response {
         $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
         $user = $this->getUser();
@@ -81,9 +82,8 @@ class DataImportController extends AbstractController
         $trafic = $request->files->get('trafic') ?? $request->files->get('trafic_file');
         $port = $request->files->get('port') ?? $request->files->get('port_file');
         $liaison = $request->files->get('liaison') ?? $request->files->get('type_liaison_file');
-        $gps = $request->files->get('gps') ?? $request->files->get('gps_file');
 
-        if (!$this->validateFiles($trafic, $port, $liaison)) {
+        if (!$this->validateFiles($trafic)) {
             $this->addFlash('error', 'Le fichier trafic est obligatoire.');
             return $this->redirectToRoute('superuser_dashboard_import');
         }
@@ -92,7 +92,7 @@ class DataImportController extends AbstractController
         $liaisonFileName = $liaison ? $liaison->getClientOriginalName() : '';
 
         try {
-            $data = $pythonApiClient->processFiles($trafic, $port, $liaison, $gps);
+            $data = $pythonApiClient->processFiles($trafic, $port, $liaison, null);
             if (($data['status'] ?? '') !== 'success') {
                 throw new \Exception($data['message'] ?? 'Erreur inconnue du service Python');
             }
@@ -100,7 +100,7 @@ class DataImportController extends AbstractController
             $stats = $this->saveProcessedData(
                 $data, $user, $trafic->getClientOriginalName(),
                 $portFileName, $liaisonFileName, $em, $processedSiteRepository,
-                $siteAlertRepository, $notificationService
+                $siteAlertRepository, $notificationService, $stateCalculator
             );
 
             $this->addFlash('success', sprintf(
@@ -114,16 +114,61 @@ class DataImportController extends AbstractController
         return $this->redirectToRoute('superuser_plan_data', ['imported' => 1]);
     }
 
-    private function validateFiles(?UploadedFile $trafic, ?UploadedFile $port, ?UploadedFile $liaison): bool
+    private function validateFiles(?UploadedFile $trafic): bool
     {
         return $trafic !== null && $trafic->getSize() > 0;
+    }
+
+    /**
+     * ✅ Normalise une valeur héritée (avant le correctif) vers le
+     * vocabulaire canonique unique :
+     *   status (état)    : OK | RISQUE_DE_CONGESTION | CONGESTION |
+     *                       CONGESTION(FDD) | CONGESTION(TDD) | BRIDAGE
+     *   siteStatus (stat): CRITIQUE | SURVEILLANCE | SECURISE
+     * Les anciennes lignes en base ont pu être écrites avec des variantes
+     * ('critical', 'CONGESTIONNE', 'SOUS_OBSERVATION', ...) par du code
+     * antérieur ; on les ramène ici au format canonique, une fois pour
+     * toutes, à chaque nouvelle écraciture.
+     */
+private function normalizeStatus(string $value): string
+{
+    $v = strtoupper(trim($value));
+    return match ($v) {
+        'CRITIQUE', 'CRITICAL' => 'CRITIQUE',
+        'SOUS_OBSERVATION', 'SURVEILLANCE', 'WARNING' => 'SOUS_OBSERVATION',
+        'OK', 'SECURISE', 'SECURE' => 'OK',
+        default => 'OK',
+    };
+}
+
+private function normalizeSiteStatus(string $value, string $status): string
+{
+    $v = strtoupper(trim($value));
+    return match ($v) {
+        'CONGESTION', 'CONGESTIONNE', 'CONGESTION(FDD)', 'CONGESTION(TDD)' => 'CONGESTION',
+        'BRIDAGE' => 'BRIDAGE',
+        'RISQUE_DE_CONGESTION' => 'RISQUE_DE_CONGESTION',
+        'RISQUE_DE_BRIDAGE' => 'RISQUE_DE_BRIDAGE',
+        'OK', 'SECURISE', 'SECURE', '' => 'OK',
+        default => $status === 'CRITIQUE' ? 'CONGESTION' : 'OK',
+    };
+}
+    private function normalizeClassification(string $value): string
+    {
+        return match (strtoupper(trim($value))) {
+            'NO_COTRANS', 'NON COTRANS' => 'NON-COTRANS',
+            'ONLY_FDD', 'FDD' => 'ONLY-FDD',
+            'TF', 'COTRANS', 'NON-COTRANS', 'ONLY-FDD' => strtoupper(trim($value)),
+            default => 'ONLY-FDD',
+        };
     }
 
     private function saveProcessedData(
         array $payload, $user, string $trafficFileName,
         string $portsFileName, string $liaisonFileName,
         EntityManagerInterface $em, ProcessedSiteRepository $processedSiteRepository,
-        SiteAlertRepository $siteAlertRepository, NotificationService $notificationService
+        SiteAlertRepository $siteAlertRepository, NotificationService $notificationService,
+        SiteStateCalculatorService $stateCalculator
     ): array {
         $stats = $payload['data']['stats'] ?? [];
 
@@ -158,10 +203,7 @@ class DataImportController extends AbstractController
             $pairedSiteName = trim((string) ($item['Site_FDD'] ?? $item['siteFdd'] ?? $item['PairedSiteName'] ?? '')) ?: null;
 
             $classification = trim((string) ($item['Classification'] ?? $item['classification'] ?? ''));
-            if ($classification === '' || $classification === '-') {
-                $classification = 'UNKNOWN';
-            }
-            $classification = strtoupper($classification);
+            $classification = $this->normalizeClassification($classification);
 
             $typeTrans = $item['Type_Trans'] ?? $item['typeTrans'] ?? null;
             if ($this->isMissingType($typeTrans) && $existingSite && !$this->isMissingType($existingSite->getTypeTrans())) {
@@ -201,7 +243,6 @@ class DataImportController extends AbstractController
             $dropCongFdd = (int) ($item['DropCong_FDD'] ?? $item['dropcong_fdd'] ?? 0);
             $dropCongTf = (int) ($item['DropCong_TF'] ?? $item['dropcong_tf'] ?? 0);
 
-            // ✅ NOUVEAU : KPI indisponibilité S1
             $s1FailDuration = (float) ($item['S1_Fail_Duration'] ?? $item['s1FailDuration'] ?? 0);
             $s1FailDateRaw = $item['S1_Fail_Date'] ?? $item['s1FailDate'] ?? null;
             $s1FailDate = null;
@@ -220,16 +261,21 @@ class DataImportController extends AbstractController
                 $longitude = $longitude ?? $existingSite->getLongitude();
             }
 
-            $etatSite = trim((string) ($item['etat_site'] ?? $item['etatSite'] ?? 'OK'));
-            $siteStatus = trim((string) ($item['site_status'] ?? $item['siteStatus'] ?? 'SECURISE'));
-            $isCritical = (bool) ($item['is_critical'] ?? $item['isCritical'] ?? false);
+            // ✅ Normalisation systématique -> plus jamais de doublons
+            // 'critical'/'CRITIQUE' ou 'CONGESTIONNE'/'CONGESTION'.
+            $status = $this->normalizeStatus((string) ($item['status'] ?? 'OK'));
+            $siteStatus = $this->normalizeSiteStatus(
+                (string) ($item['site_status'] ?? $item['siteStatus'] ?? $item['etat_site'] ?? 'OK'),
+                $status
+            );
+            $etatSite = $siteStatus;
+            $isCritical = $status === 'CRITIQUE';
 
             $recommendation = $this->buildRecommendationFromState(
                 $etatSite, $siteStatus, $classification, $typeTrans,
                 $maxTrafic, $capaciteMbps, $tauxUtilisation, $nombreOccurrences
             );
 
-            $status = $etatSite;
             $recommendedAction = $recommendation['actionType'];
             $finalActionPlan = $recommendation['actionLabel'];
 
@@ -269,16 +315,12 @@ class DataImportController extends AbstractController
                 mb_strtolower(trim((string) ($recommendedAction ?? ''))),
                 mb_strtolower(trim((string) ($finalActionPlan ?? ''))),
                 mb_strtolower((string) ($resolvedService ?? '')),
-                mb_strtolower((string) $etatSite),
             ]));
 
             $totalProcessed++;
-            if ($existingSite && $existingSite->getDataHash() === $hash) {
-                continue;
-            }
 
-            $etatsSurveilles = ['CONGESTION', 'CONGESTION(FDD)', 'CONGESTION(TDD)', 'BRIDAGE', 'RISQUE_DE_CONGESTION', 'COUPURE_S1'];
-            $ancienEtat = $existingSite ? $existingSite->getStatus() : null;
+            $etatsSurveilles = ['CONGESTION', 'CONGESTION(FDD)', 'CONGESTION(TDD)', 'BRIDAGE', 'RISQUE_DE_CONGESTION'];
+            $ancienEtat = $existingSite ? $existingSite->getSiteStatus() : null;
             if (in_array($etatSite, $etatsSurveilles, true) && $ancienEtat !== $etatSite) {
                 $alertMessage = sprintf(
                     "Trafic: %.2f Mbps / Capacité: %.2f Mbps (%.1f%%)\nOccurrences: %d\nClassification: %s / Type: %s%s",
@@ -350,12 +392,17 @@ class DataImportController extends AbstractController
         $em->flush();
 
         foreach ($pendingAlerts as $alert) {
+            // ✅ CORRIGÉ : plus de tri sur 'a.dateAlerte' (le champ n'existe
+            // pas sous ce nom sur l'entité SiteAlert -> Semantical Error).
+            // On récupère l'alerte la plus récente via son id (auto-
+            // incrémenté), ce qui est équivalent chronologiquement et ne
+            // dépend d'aucun nom de champ date potentiellement différent.
             $alertEntity = $siteAlertRepository->createQueryBuilder('a')
                 ->andWhere('a.site = :site')
                 ->andWhere('a.etat = :etat')
                 ->setParameter('site', $alert['site'])
                 ->setParameter('etat', $alert['etat'])
-                ->orderBy('a.dateAlerte', 'DESC')
+                ->orderBy('a.id', 'DESC')
                 ->setMaxResults(1)
                 ->getQuery()
                 ->getOneOrNullResult();
@@ -367,8 +414,7 @@ class DataImportController extends AbstractController
             try {
                 $notificationService->notifySiteAlert($alertEntity);
             } catch (\Throwable $e) {
-                // Une erreur de notification ne doit jamais faire échouer
-                // un import déjà sauvegardé avec succès.
+                // ignore
             }
         }
 
@@ -397,10 +443,6 @@ class DataImportController extends AbstractController
         $actionLabel = 'Maintenir sous surveillance';
 
         switch ($etatSite) {
-            case 'COUPURE_S1':
-                $actionType = 'URGENT_S1_CHECK';
-                $actionLabel = 'Verifier immediatement la liaison S1 (coupure detectee)';
-                break;
             case 'CONGESTION':
                 $actionType = 'URGENT_UPGRADE';
                 $actionLabel = 'Upgrade urgent de capacite';
@@ -420,14 +462,6 @@ class DataImportController extends AbstractController
             case 'BRIDAGE':
                 $actionType = 'INVESTIGATE_BRIDAGE';
                 $actionLabel = 'Investiguer le bridage de trafic';
-                break;
-            case 'A_VERIFIER_CAPACITE':
-                $actionType = 'VERIFY_CAPACITY';
-                $actionLabel = 'Verifier la capacite declaree';
-                break;
-            case 'SANS_TYPE':
-                $actionType = 'DEFINE_TYPE';
-                $actionLabel = 'Definir le type de liaison';
                 break;
             case 'OK':
             default:
@@ -610,34 +644,45 @@ class DataImportController extends AbstractController
         return $count;
     }
 
-#[Route('/superuser/import/dropcong', name: 'superuser_import_dropcong', methods: ['POST'])]
-public function importDropcong(Request $request, PythonApiClient $pythonApiClient): Response
-{
-    $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
+    #[Route('/superuser/import/gps', name: 'superuser_import_gps', methods: ['POST'])]
+    public function importGps(Request $request, PythonApiClient $pythonApiClient, EntityManagerInterface $em, ProcessedSiteRepository $repo): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
 
-    $fichier = $request->files->get('fichier');
-    if (!$fichier instanceof UploadedFile) {
-        $this->addFlash('error', 'Le fichier principal est obligatoire.');
+        $file = $request->files->get('gps_file');
+        if (!$file instanceof UploadedFile) {
+            $this->addFlash('error', 'Aucun fichier GPS fourni.');
+            return $this->redirectToRoute('superuser_dashboard_import');
+        }
+
+        try {
+            $result = $pythonApiClient->importGps($file);
+            if (($result['status'] ?? '') !== 'success') {
+                throw new \Exception($result['message'] ?? 'Erreur import GPS.');
+            }
+
+            $conn = $em->getConnection();
+            $rows = $conn->fetchAllAssociative('SELECT site, latitude, longitude FROM site_gps');
+            $updated = 0;
+            foreach ($rows as $row) {
+                $site = $repo->findOneBySiteName((string) $row['site']);
+                if (!$site) {
+                    $prefix = \App\Util\SiteNameHelper::extractPrefix((string) $row['site']);
+                    $site = $repo->findOneBySiteName($prefix);
+                }
+                if ($site) {
+                    $site->setLatitude((float) $row['latitude']);
+                    $site->setLongitude((float) $row['longitude']);
+                    $updated++;
+                }
+            }
+            $em->flush();
+
+            $this->addFlash('success', ($result['message'] ?? 'GPS importé.') . " ($updated site(s) synchronisés sur la carte)");
+        } catch (\Throwable $e) {
+            $this->addFlash('error', 'Erreur GPS : ' . $e->getMessage());
+        }
+
         return $this->redirectToRoute('superuser_dashboard_import');
     }
-
-    $drop1 = $request->files->get('drop1');
-    $drop2 = $request->files->get('drop2');
-
-    try {
-        $result = $pythonApiClient->importDropcong($fichier, $drop1, $drop2);
-
-        if (($result['status'] ?? '') === 'success') {
-            $this->addFlash('success', $result['message'] ?? 'Import DropCong réussi.');
-        } else {
-            $this->addFlash('error', $result['message'] ?? 'Erreur lors de l\'import DropCong.');
-        }
-    } catch (\Throwable $e) {
-        $this->addFlash('error', 'Erreur technique : ' . $e->getMessage());
-    }
-
-    return $this->redirectToRoute('superuser_dashboard_import');
-}
-
-
 }

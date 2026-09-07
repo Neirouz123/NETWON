@@ -21,6 +21,14 @@ class FoController extends AbstractController
 {
     private const SERVICE = 'FO';
 
+    /**
+     * Départements qui passent par CE dashboard, quel que soit le service
+     * (FO ou FH) du site traité. support_trans et ingenierie_ip sont des
+     * départements du service FO, mais reçoivent aussi des tâches FH
+     * (soft upgrade -> support_trans, LLD après MLO NOK -> ingenierie_ip).
+     */
+    private const FO_DASHBOARD_DEPARTMENTS = ['ingenierie_ip', 'support_trans'];
+
     public function __construct(
         private TicketTaskRepository $taskRepo,
         private FoWorkflowService $foWorkflowService,
@@ -38,10 +46,7 @@ class FoController extends AbstractController
 
         $allTasks = $this->taskRepo->findBy(['assignedTo' => $user], ['createdAt' => 'DESC']);
 
-        $foTasks = array_values(array_filter(
-            $allTasks,
-            fn(TicketTask $t) => strtoupper($t->getServiceName() ?? '') === self::SERVICE
-        ));
+        $foTasks = array_values(array_filter($allTasks, fn(TicketTask $t) => $this->belongsToFoDashboard($t)));
 
         $tasks = $foTasks;
         if ($search !== '') {
@@ -133,7 +138,7 @@ class FoController extends AbstractController
         $fhFields = $task->getFhFields() ?? [];
         $ticket = $task->getTicket();
 
-        $previousTasks = $ticket->getTasks()->filter(function($t) use ($task) {
+        $previousTasks = $ticket->getTasks()->filter(function ($t) use ($task) {
             return $t->getStepOrder() < $task->getStepOrder() && $t->getStatus() === TicketTask::STATUS_DONE;
         });
 
@@ -158,6 +163,21 @@ class FoController extends AbstractController
     public function siteDecision(TicketTask $task, int $siteId, Request $request): Response
     {
         $this->denyAccessUnlessTaskBelongsToFo($task);
+
+        // Les tâches FH transmises via advanceTo() (fh_execution_wo,
+        // fh_lld) sont traitées par processFhTask(), pas par le flux
+        // "processSiteDecision" propre à l'analyse initiale FO.
+        if ($this->isFhStep($task->getStepCode())) {
+            $decision = $request->request->get('decision', 'OK');
+            $comment = $request->request->get('comment');
+            $formData = $request->request->all();
+            $formData = array_filter($formData, fn($v) => $v !== '' && $v !== null);
+
+            $this->foWorkflowService->completeFhTaskViaFoDashboard($task, $decision, $formData, $comment, $this->getUser());
+
+            $this->addFlash('success', 'Étape FH traitée avec succès.');
+            return $this->redirectToRoute('dashboard_fo_index');
+        }
 
         $decision = $request->request->get('decision', 'OK');
         $motif    = $request->request->get('motif') ?: null;
@@ -188,10 +208,8 @@ class FoController extends AbstractController
             return $this->redirectToRoute('dashboard_fo_task_show', ['id' => $task->getId()]);
         }
 
-        // 🔥 Utiliser processSiteDecision pour gérer chaque site indépendamment
         $this->foWorkflowService->processSiteDecision($task, $siteId, $decision, $motif, $this->getUser());
 
-        // Vérifier si tous les sites sont traités
         $allDone = true;
         foreach ($sites as $s) {
             if ($s->getStatus() !== 'completed') {
@@ -232,7 +250,6 @@ class FoController extends AbstractController
 
         $siteData = $task->getSiteData() ?? [];
 
-        // Sauvegarder la décision dans siteDecisions
         $siteDecisions = $task->getSiteDecisions() ?? [];
         foreach ($siteData as $siteId) {
             $siteDecisions[$siteId] = array_merge($siteDecisions[$siteId] ?? [], [
@@ -242,7 +259,6 @@ class FoController extends AbstractController
         }
         $task->setSiteDecisions($siteDecisions);
 
-        // Compléter la tâche
         $this->foWorkflowService->completeFoTask($task, $decision, 'swap_routeur', $this->getUser());
 
         $this->addFlash('success', 'Swap routeur validé.');
@@ -250,8 +266,42 @@ class FoController extends AbstractController
         return $this->redirectToRoute('dashboard_fo_task_show', ['id' => $task->getId()]);
     }
 
+    /**
+     * Une tâche appartient à CE dashboard si elle est traitée par un
+     * département FO-natif (ingenierie_ip, support_trans) — que le site
+     * d'origine soit FO ou FH. Fallback sur serviceName pour les tâches
+     * legacy créées avant que departmentName soit systématiquement rempli.
+     */
+    private function belongsToFoDashboard(TicketTask $t): bool
+    {
+        $dept = $t->getDepartmentName();
+        if ($dept !== null && $dept !== '') {
+            return in_array($dept, self::FO_DASHBOARD_DEPARTMENTS, true);
+        }
+
+        return strtoupper($t->getServiceName() ?? '') === self::SERVICE;
+    }
+
+    private function isFhStep(?string $stepCode): bool
+    {
+        return in_array($stepCode, [
+            TicketTask::STEP_FH_EXECUTION_WO,
+            TicketTask::STEP_FH_LLD,
+        ], true);
+    }
+
+    /**
+     * Sites à afficher pour cette tâche. Priorité au site lié directement
+     * (nouveau modèle task <-> site 1:1) — c'est le cas de toutes les
+     * tâches FH transmises à ce dashboard, dont le TicketSite garde son
+     * service d'origine (FH), qu'il ne faut pas filtrer par service FO.
+     */
     private function getSitesForTask(TicketTask $task): array
     {
+        if ($task->getTicketSite()) {
+            return [$task->getTicketSite()];
+        }
+
         $ticket = $task->getTicket();
         if (!$ticket) {
             return [];
@@ -269,6 +319,18 @@ class FoController extends AbstractController
         $sharedDepartments = ['deploiement_telecom', 'support_radio', 'support_backhaul'];
         if (in_array($department, $sharedDepartments, true)) {
             return $ticket->getTicketSites()->toArray();
+        }
+
+        // Legacy : tâche multi-sites sans lien direct, restreindre par le
+        // périmètre de la tâche elle-même (siteData), pas par le service
+        // affiché sur les TicketSite (une tâche FH transmise ici peut
+        // légitimement porter sur des sites de service FH).
+        $siteIds = $task->getSiteData() ?? [];
+        if ($siteIds !== []) {
+            return array_values(array_filter(
+                $ticket->getTicketSites()->toArray(),
+                fn($site) => in_array($site->getId(), $siteIds, true)
+            ));
         }
 
         $sites = [];
@@ -290,8 +352,6 @@ class FoController extends AbstractController
         $sites = $this->getSitesForTask($task);
         $total = count($sites);
         if ($total === 0) {
-            $ticket->setProgress(0);
-            $this->em->flush();
             return;
         }
 
@@ -303,8 +363,8 @@ class FoController extends AbstractController
 
     private function denyAccessUnlessTaskBelongsToFo(TicketTask $task): void
     {
-        if (strtoupper($task->getServiceName() ?? '') !== self::SERVICE) {
-            throw $this->createAccessDeniedException('Cette tâche n\'appartient pas au service FO.');
+        if (!$this->belongsToFoDashboard($task)) {
+            throw $this->createAccessDeniedException('Cette tâche n\'appartient pas au périmètre de ce tableau de bord.');
         }
         $user = $this->getUser();
         if ($task->getAssignedTo()?->getId() !== $user->getId()) {

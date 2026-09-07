@@ -5,8 +5,9 @@ namespace App\Controller;
 
 use App\Service\WorkflowAutoAssigner;
 use App\Entity\Ticket;
+use App\Entity\TicketComment;
 use App\Entity\TicketSite;
-use App\Entity\TicketTask; // 🔥 Ajout du use manquant
+use App\Entity\TicketTask;
 use App\Entity\User;
 use App\Form\SuperuserTicketType;
 use App\Repository\ProcessedSiteRepository;
@@ -120,41 +121,36 @@ class SuperuserWorkflowController extends AbstractController
 
                 $em->persist($ticket);
 
-                $selectedSites = [];
+                // Chaque site reçoit sa propre chaîne de traitement, indépendante
+                // du service des autres sites du même workflow.
+                $createdTicketSites = [];
                 foreach ($selectedSiteIds as $siteId) {
-                    $processedSite = $processedSiteRepository->find((int)$siteId);
+                    $processedSite = $processedSiteRepository->find((int) $siteId);
                     if (!$processedSite) continue;
+
                     $ticketSite = new TicketSite();
                     $ticketSite->setTicket($ticket);
                     $ticketSite->setSiteName($processedSite->getSiteName());
                     $ticketSite->setTypeTrans($processedSite->getTypeTrans());
-                    $ticketSite->setServiceName($processedSite->getServiceName());
+                    $ticketSite->setServiceName(strtoupper($processedSite->getServiceName() ?: 'SHARED'));
                     $em->persist($ticketSite);
-                    $selectedSites[] = $processedSite;
+
+                    $createdTicketSites[] = $ticketSite;
                 }
 
-                // Déterminer le nombre d'étapes selon le service du premier site
-                $firstSite = $selectedSites[0] ?? null;
-                if ($firstSite) {
-                    $service = strtoupper($firstSite->getService() ?? '');
-                    if ($service === 'FH') {
-                        $ticket->setTotalSteps(7);
-                    } else {
-                        $ticket->setTotalSteps(5);
-                    }
-                } else {
-                    $ticket->setTotalSteps(7);
+                if (empty($createdTicketSites)) {
+                    $this->addFlash('error', 'Aucun site valide sélectionné.');
+                    return $this->redirectToRoute('superuser_workflow_new');
                 }
-                $ticket->setCurrentStep(1);
 
-                $assignedUsers = $autoAssigner->assignUsersForSites($selectedSites, $ticket, $currentUser);
+                $assignedUsers = $autoAssigner->assignUsersForTicketSites($createdTicketSites, $ticket, $currentUser);
 
                 $ticketWorkflowService->refreshTicketProgress($ticket);
                 $ticketWorkflowService->addHistory(
                     $ticket,
                     $currentUser,
                     'ticket_created',
-                    sprintf('Workflow créé avec %d site(s) et %d utilisateur(s) assigné(s).', count($selectedSites), count($assignedUsers))
+                    sprintf('Workflow créé avec %d site(s) et %d utilisateur(s) assigné(s).', count($createdTicketSites), count($assignedUsers))
                 );
 
                 $em->flush();
@@ -210,7 +206,7 @@ class SuperuserWorkflowController extends AbstractController
             $sites = $ticket->getTicketSites();
             $completedSites = 0;
             foreach ($sites as $site) {
-                if ($site->getStatus() === 'completed') {
+                if (in_array($site->getStatus(), ['completed', 'validated'], true)) {
                     $completedSites++;
                 }
             }
@@ -330,39 +326,96 @@ class SuperuserWorkflowController extends AbstractController
         return null;
     }
 
+    #[Route('/ticket/{id}/comment', name: 'superuser_workflow_comment', methods: ['POST'])]
+    public function addComment(Ticket $ticket, Request $request, EntityManagerInterface $em, TicketWorkflowService $workflowService): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
 
-    // Ajoutez cette méthode dans SuperuserWorkflowController
+        $message = trim((string) $request->request->get('message'));
+        if (empty($message)) {
+            $this->addFlash('error', 'Le commentaire ne peut pas être vide.');
+            return $this->redirectToRoute('superuser_workflow_show', ['id' => $ticket->getId()]);
+        }
 
-#[Route('/ticket/{id}/comment', name: 'superuser_workflow_comment', methods: ['POST'])]
-public function addComment(Ticket $ticket, Request $request, EntityManagerInterface $em, TicketWorkflowService $workflowService): Response
-{
-    $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
+        $comment = new TicketComment();
+        $comment->setTicket($ticket);
+        $comment->setUser($this->getUser());
+        $comment->setMessage($message);
 
-    $message = trim((string) $request->request->get('message'));
-    if (empty($message)) {
-        $this->addFlash('error', 'Le commentaire ne peut pas être vide.');
+        $uploadedFile = $request->files->get('filePath');
+        if ($uploadedFile) {
+            $filename = uniqid('ticket_comment_', true) . '.' . $uploadedFile->guessExtension();
+            $uploadedFile->move($this->getParameter('ticket_proofs_directory'), $filename);
+            $comment->setFilePath($filename);
+        }
+
+        $em->persist($comment);
+        $workflowService->addHistory($ticket, $this->getUser(), 'comment_added', 'Commentaire ajouté.');
+        $em->flush();
+
+        $this->addFlash('success', 'Commentaire ajouté.');
+        return $this->redirectToRoute('superuser_workflow_show', ['id' => $ticket->getId()]);
+    }
+#[Route('/ticket/{id}/site/{siteId}/validate', name: 'superuser_workflow_validate_site', methods: ['POST'])]
+    public function validateSite(Ticket $ticket, int $siteId, Request $request, EntityManagerInterface $em): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
+
+        $ticketSite = null;
+        foreach ($ticket->getTicketSites() as $ts) {
+            if ($ts->getId() === $siteId) {
+                $ticketSite = $ts;
+                break;
+            }
+        }
+        if (!$ticketSite) {
+            $this->addFlash('error', 'Site introuvable.');
+            return $this->redirectToRoute('superuser_workflow_show', ['id' => $ticket->getId()]);
+        }
+
+        // Trouver la tâche de validation pour ce site
+        $validationTask = null;
+        foreach ($ticket->getTasks() as $task) {
+            if ($task->getTicketSite() && $task->getTicketSite()->getId() === $siteId
+                && $task->getStepCode() === TicketTask::STEP_SUPERUSER_VALIDATION
+                && $task->getStatus() !== TicketTask::STATUS_DONE) {
+                $validationTask = $task;
+                break;
+            }
+        }
+        if (!$validationTask) {
+            $this->addFlash('error', 'Aucune tâche de validation en attente pour ce site.');
+            return $this->redirectToRoute('superuser_workflow_show', ['id' => $ticket->getId()]);
+        }
+
+        $comment = $request->request->get('comment');
+        $validationTask->setStatus(TicketTask::STATUS_DONE);
+        $validationTask->setCompletedAt(new \DateTime());
+        $validationTask->setDecision('OK');
+        $validationTask->setComment($comment);
+
+        $ticketSite->setStatus(TicketSite::STATUS_VALIDATED);
+
+        $em->flush();
+
+        $this->addFlash('success', 'Site ' . $ticketSite->getSiteName() . ' validé avec succès.');
+
+        // Vérifier si tous les sites sont validés ou rejetés
+        $allDone = true;
+        foreach ($ticket->getTicketSites() as $ts) {
+            if (!in_array($ts->getStatus(), [TicketSite::STATUS_VALIDATED, TicketSite::STATUS_REJECTED])) {
+                $allDone = false;
+                break;
+            }
+        }
+        if ($allDone) {
+            $ticket->setStatus('completed');
+            $ticket->setUpdatedAt(new \DateTime());
+            $em->flush();
+            $this->addFlash('success', 'Tous les sites sont validés, le ticket est terminé.');
+        }
+
         return $this->redirectToRoute('superuser_workflow_show', ['id' => $ticket->getId()]);
     }
 
-    $comment = new TicketComment();
-    $comment->setTicket($ticket);
-    $comment->setUser($this->getUser());
-    $comment->setMessage($message);
-
-    $uploadedFile = $request->files->get('filePath');
-    if ($uploadedFile) {
-        $filename = uniqid('ticket_comment_', true) . '.' . $uploadedFile->guessExtension();
-        $uploadedFile->move($this->getParameter('ticket_proofs_directory'), $filename);
-        $comment->setFilePath($filename);
     }
-
-    $em->persist($comment);
-    $workflowService->addHistory($ticket, $this->getUser(), 'comment_added', 'Commentaire ajouté.');
-    $em->flush();
-
-    $this->addFlash('success', 'Commentaire ajouté.');
-    return $this->redirectToRoute('superuser_workflow_show', ['id' => $ticket->getId()]);
-}
-
-
-}

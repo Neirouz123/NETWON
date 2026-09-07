@@ -1,15 +1,15 @@
 <?php
-
+// src/Service/SiteStateCalculatorService.php
 namespace App\Service;
 
 use App\Entity\ProcessedSite;
 
 /**
- * ✅ ÉTENDU : prise en compte du KPI d'indisponibilité S1
- * (L.Cell.Unavail.Dur.Sys.S1Fail(s)). Si s1FailDuration > 0, l'état
- * COUPURE_S1 prend systématiquement la priorité sur tout calcul de
- * congestion/bridage, y compris lors des recalculs déclenchés après une
- * mise à jour de capacité ou de type de liaison.
+ * ✅ RÈGLE UNIQUE (alignée sur traitement.py) :
+ *   status = CRITIQUE          <=> état technique = BRIDAGE/CONGESTION
+ *   status = SOUS_OBSERVATION  <=> état technique = RISQUE_DE_CONGESTION
+ *   status = OK                <=> état technique = OK
+ * Le type de liaison manquant et S1 ne modifient JAMAIS status/siteStatus/isCritical.
  */
 class SiteStateCalculatorService
 {
@@ -17,8 +17,11 @@ class SiteStateCalculatorService
     private const SEUIL_OCCURRENCES_BRIDAGE = 50;
     private const SEUIL_OCCURRENCES_RISQUE_CONGESTION = 57;
     private const CAPACITE_10G_MBPS = 10000.0;
+    private const SEUIL_OCCURRENCES_VERIFICATION_CAPACITE = 20;
 
-    public const ETATS_CRITIQUES = ['CONGESTION', 'CONGESTION(FDD)', 'CONGESTION(TDD)', 'BRIDAGE', 'COUPURE_S1'];
+    public const ETATS_CRITIQUES = ['CONGESTION','BRIDAGE'];
+    public const ETATS_RISQUE = ['RISQUE_DE_CONGESTION', 'RISQUE_DE_BRIDAGE'];
+
 
     public function isMissingType(?string $type): bool
     {
@@ -26,108 +29,81 @@ class SiteStateCalculatorService
         return $t === '' || in_array($t, ['NON_DEFINI', 'UNKNOWN', 'N/A', 'NA', '-'], true);
     }
 
-    public function recalculer(ProcessedSite $site): void
-    {
-        $classification = strtoupper(trim((string) $site->getClassification()));
-        $typeTrans = $site->getTypeTrans();
+public function recalculer(ProcessedSite $site): void
+{
+    $classification = strtoupper(trim((string) $site->getClassification()));
+    $typeTrans = $site->getTypeTrans();
 
-        $maxTrafic = (float) ($site->getMaxTrafic() ?? 0);
-        $maxTraficTdd = (float) ($site->getMaxTraficTdd() ?? 0);
-        $maxTraficFdd = (float) ($site->getMaxTraficFdd() ?? 0);
+    $maxTrafic = (float) ($site->getMaxTrafic() ?? 0);
+    $maxTraficTdd = (float) ($site->getMaxTraficTdd() ?? 0);
+    $maxTraficFdd = (float) ($site->getMaxTraficFdd() ?? 0);
 
-        $capaciteTdd = (float) ($site->getCapaciteTddMbps() ?? 0);
-        $capaciteFdd = (float) ($site->getCapaciteFddMbps() ?? 0);
-        $capaciteGlobale = (float) ($site->getCapaciteMbps() ?? 0);
+    $capaciteTdd = (float) ($site->getCapaciteTddMbps() ?? 0);
+    $capaciteFdd = (float) ($site->getCapaciteFddMbps() ?? 0);
+    $capaciteGlobale = (float) ($site->getCapaciteMbps() ?? 0);
 
-        $occurrences = (int) $site->getNombreOccurrences();
-        $occTdd = (int) ($site->getNombreOccurrencesTdd() ?? 0);
-        $occFdd = (int) ($site->getNombreOccurrencesFdd() ?? 0);
+    $occurrences = (int) $site->getNombreOccurrences();
+    $occTdd = (int) ($site->getNombreOccurrencesTdd() ?? 0);
+    $occFdd = (int) ($site->getNombreOccurrencesFdd() ?? 0);
 
-        $s1FailDuration = (float) ($site->getS1FailDuration() ?? 0);
+    $tauxTdd = ($capaciteTdd > 0 && $maxTraficTdd > 0) ? round(($maxTraficTdd / $capaciteTdd) * 100, 2) : null;
+    $tauxFdd = ($capaciteFdd > 0 && $maxTraficFdd > 0) ? round(($maxTraficFdd / $capaciteFdd) * 100, 2) : null;
 
-        $tauxTdd = ($capaciteTdd > 0 && $maxTraficTdd > 0)
-            ? round(($maxTraficTdd / $capaciteTdd) * 100, 2) : null;
-        $tauxFdd = ($capaciteFdd > 0 && $maxTraficFdd > 0)
-            ? round(($maxTraficFdd / $capaciteFdd) * 100, 2) : null;
+    $classer = function (float $taux, int $occ): string {
+        if ($taux >= self::SEUIL_CONGESTION_PCT) {
+            return $occ >= self::SEUIL_OCCURRENCES_RISQUE_CONGESTION ? 'CONGESTION' : 'RISQUE_DE_CONGESTION';
+        }
+        if ($occ >= self::SEUIL_OCCURRENCES_BRIDAGE) {
+            return 'BRIDAGE';
+        }
+        if ($occ >= self::SEUIL_OCCURRENCES_VERIFICATION_CAPACITE) {
+            return 'RISQUE_DE_BRIDAGE';
+        }
+        return 'OK';
+    };
 
-        $tauxGlobal = null;
+    $gravite = ['OK' => 0, 'RISQUE_DE_BRIDAGE' => 1, 'RISQUE_DE_CONGESTION' => 2, 'BRIDAGE' => 3, 'CONGESTION' => 4];
+    $pire = fn(string $a, string $b) => $gravite[$a] >= $gravite[$b] ? $a : $b;
+
+    $tauxGlobal = null;
+
+    if (in_array($classification, ['COTRANS', 'NON-COTRANS', 'NO_COTRANS'], true)) {
+        $etat = $pire($classer($tauxFdd ?? 0, $occFdd), $classer($tauxTdd ?? 0, $occTdd));
+    } elseif ($capaciteGlobale <= 0) {
         $etat = 'OK';
+    } else {
+        $tauxGlobal = $maxTrafic > 0 ? round(($maxTrafic / $capaciteGlobale) * 100, 2) : null;
+        $taux = $tauxGlobal ?? 0.0;
 
-        if ($s1FailDuration > 0) {
-            // ✅ Priorité absolue : coupure S1 détectée, aucun trafic ne
-            // transite réellement -- on ne cherche pas à calculer un taux
-            // de congestion qui n'aurait pas de sens.
-            $etat = 'COUPURE_S1';
-            $tauxGlobal = $capaciteGlobale > 0 && $maxTrafic > 0
-                ? round(($maxTrafic / $capaciteGlobale) * 100, 2) : null;
-        } elseif (in_array($classification, ['COTRANS', 'NO_COTRANS'], true)) {
-            $tauxGlobal = null;
-
-            $fddCongest = ($tauxFdd ?? 0) >= self::SEUIL_CONGESTION_PCT && $occFdd >= self::SEUIL_OCCURRENCES_RISQUE_CONGESTION;
-            $tddCongest = ($tauxTdd ?? 0) >= self::SEUIL_CONGESTION_PCT && $occTdd >= self::SEUIL_OCCURRENCES_RISQUE_CONGESTION;
-
-            if ($fddCongest && $tddCongest) {
-                $etat = 'CONGESTION';
-            } elseif ($fddCongest) {
-                $etat = 'CONGESTION(FDD)';
-            } elseif ($tddCongest) {
-                $etat = 'CONGESTION(TDD)';
-            } elseif ((($tauxFdd ?? 0) >= self::SEUIL_CONGESTION_PCT && $occFdd < self::SEUIL_OCCURRENCES_RISQUE_CONGESTION)
-                || (($tauxTdd ?? 0) >= self::SEUIL_CONGESTION_PCT && $occTdd < self::SEUIL_OCCURRENCES_RISQUE_CONGESTION)) {
-                $etat = 'RISQUE_DE_CONGESTION';
-            } else {
-                $etat = 'OK';
-            }
-        } elseif ($capaciteGlobale <= 0) {
-            $etat = 'OK';
-            $tauxGlobal = null;
+        if ($classification !== 'TF'
+            && abs($capaciteGlobale - self::CAPACITE_10G_MBPS) < 1.0
+            && $taux >= self::SEUIL_CONGESTION_PCT
+            && $occurrences >= self::SEUIL_OCCURRENCES_RISQUE_CONGESTION) {
+            $etat = 'BRIDAGE';
         } else {
-            $tauxGlobal = $maxTrafic > 0 ? round(($maxTrafic / $capaciteGlobale) * 100, 2) : null;
-            $taux = $tauxGlobal ?? 0.0;
-
-            if ($classification !== 'TF'
-                && abs($capaciteGlobale - self::CAPACITE_10G_MBPS) < 1.0
-                && $taux >= self::SEUIL_CONGESTION_PCT
-                && $occurrences >= self::SEUIL_OCCURRENCES_RISQUE_CONGESTION) {
-                $etat = 'BRIDAGE';
-            } elseif ($taux >= self::SEUIL_CONGESTION_PCT && $occurrences >= self::SEUIL_OCCURRENCES_RISQUE_CONGESTION) {
-                $etat = 'CONGESTION';
-            } elseif ($taux >= self::SEUIL_CONGESTION_PCT && $occurrences < self::SEUIL_OCCURRENCES_RISQUE_CONGESTION) {
-                $etat = 'RISQUE_DE_CONGESTION';
-            } elseif ($taux < self::SEUIL_CONGESTION_PCT && $occurrences >= self::SEUIL_OCCURRENCES_BRIDAGE) {
-                $etat = 'BRIDAGE';
-            } else {
-                $etat = 'OK';
-            }
+            $etat = $classer($taux, $occurrences);
         }
-
-        $typeManquant = $this->isMissingType($typeTrans);
-
-        if (in_array($etat, self::ETATS_CRITIQUES, true) || $etat === 'RISQUE_DE_CONGESTION') {
-            $etatAffiche = $etat;
-            $siteStatus = in_array($etat, self::ETATS_CRITIQUES, true) ? 'CRITIQUE' : 'SURVEILLANCE';
-        } elseif ($typeManquant) {
-            $etatAffiche = 'SANS_TYPE';
-            $siteStatus = 'SURVEILLANCE';
-        } else {
-            $etatAffiche = $etat;
-            $siteStatus = 'SECURISE';
-        }
-
-        $site->setTauxUtilisation($tauxGlobal);
-        $site->setTauxUtilisationTdd($tauxTdd);
-        $site->setTauxUtilisationFdd($tauxFdd);
-        $site->setStatus($etatAffiche);
-        $site->setSiteStatus($siteStatus);
-        $site->setIsCritical(in_array($etat, self::ETATS_CRITIQUES, true));
-
-        $recommendation = $this->buildRecommendation(
-            $etatAffiche, $siteStatus, $classification, $typeTrans,
-            $maxTrafic, $capaciteGlobale, $tauxGlobal, $occurrences
-        );
-        $site->setRecommendedAction($recommendation['actionType']);
-        $site->setFinalActionPlan($recommendation['actionLabel']);
     }
+
+    $status = in_array($etat, self::ETATS_CRITIQUES, true)
+        ? 'CRITIQUE'
+        : (in_array($etat, self::ETATS_RISQUE, true) ? 'SOUS_OBSERVATION' : 'OK');
+    $siteStatus = $etat; // déjà dans le vocabulaire fermé
+
+    $site->setTauxUtilisation($tauxGlobal);
+    $site->setTauxUtilisationTdd($tauxTdd);
+    $site->setTauxUtilisationFdd($tauxFdd);
+    $site->setStatus($status);
+    $site->setSiteStatus($siteStatus);
+    $site->setIsCritical($status === 'CRITIQUE');
+
+    $recommendation = $this->buildRecommendation(
+        $etat, $siteStatus, $classification, $typeTrans,
+        $maxTrafic, $capaciteGlobale, $tauxGlobal, $occurrences
+    );
+    $site->setRecommendedAction($recommendation['actionType']);
+    $site->setFinalActionPlan($recommendation['actionLabel']);
+}
 
     public function buildRecommendation(
         string $etatSite, string $siteStatus, ?string $classification,
@@ -142,10 +118,6 @@ class SiteStateCalculatorService
         $actionLabel = 'Maintenir sous surveillance';
 
         switch ($etatSite) {
-            case 'COUPURE_S1':
-                $actionType = 'URGENT_S1_CHECK';
-                $actionLabel = 'Verifier immediatement la liaison S1 (coupure detectee)';
-                break;
             case 'CONGESTION':
                 $actionType = 'URGENT_UPGRADE';
                 $actionLabel = 'Upgrade urgent de capacite';
@@ -165,14 +137,6 @@ class SiteStateCalculatorService
             case 'BRIDAGE':
                 $actionType = 'INVESTIGATE_BRIDAGE';
                 $actionLabel = 'Investiguer le bridage de trafic';
-                break;
-            case 'A_VERIFIER_CAPACITE':
-                $actionType = 'VERIFY_CAPACITY';
-                $actionLabel = 'Verifier la capacite declaree';
-                break;
-            case 'SANS_TYPE':
-                $actionType = 'DEFINE_TYPE';
-                $actionLabel = 'Definir le type de liaison';
                 break;
             case 'OK':
             default:

@@ -121,21 +121,16 @@ class UserDeploiementController extends AbstractController
 
         $stepCode = $task->getStepCode();
 
-        // Détection des cas
         $isCreationWoIp = ($stepCode === TicketTask::STEP_FO_WO_IP_CREATION);
         $isPlanification = ($stepCode === TicketTask::STEP_DEPLOIEMENT_PLANIFICATION || $stepCode === TicketTask::STEP_FO_DEPLOYMENT_PLANNING);
         $isExecution = ($stepCode === TicketTask::STEP_DEPLOIEMENT_EXECUTION || $stepCode === TicketTask::STEP_FO_SITE_EXECUTION);
         $isSwap = ($stepCode === TicketTask::STEP_FO_IP_SWAP_ANALYSIS);
         $isRaccordement = ($stepCode === TicketTask::STEP_FO_CAPILLAIRE_DEPLOYMENT);
 
-        // ✅ Détection du cas hard upgrade FH
-        $isHardUpgrade = false;
-        if ($isPlanification) {
-            $deploiementData = $task->getDeploiementData() ?? [];
-            if (($deploiementData['upgrade_type'] ?? '') === 'hard') {
-                $isHardUpgrade = true;
-            }
-        }
+        // Étapes FH gérées côté Déploiement : décision MLO initiale, et
+        // validation MLO finale après retour du LLD (Ingénierie IP).
+        $isFhMlo = ($stepCode === TicketTask::STEP_FH_MLO);
+        $isFhMloValidation = ($stepCode === TicketTask::STEP_FH_MLO_VALIDATION);
 
         return $this->render('dashboard/user/deploiement-telecom/show.html.twig', [
             'task' => $task,
@@ -150,14 +145,67 @@ class UserDeploiementController extends AbstractController
             'isExecution' => $isExecution,
             'isRaccordement' => $isRaccordement,
             'isSwap' => $isSwap,
-            'isHardUpgrade' => $isHardUpgrade,
+            'isFhMlo' => $isFhMlo,
+            'isFhMloValidation' => $isFhMloValidation,
+            'isFoPlanning' => $isPlanification && (
+                $stepCode === TicketTask::STEP_FO_DEPLOYMENT_PLANNING
+                || (($task->getDeploiementData() ?? [])['workflow_origin'] ?? null) === 'fo'
+            ),
         ]);
+    }
+
+    /**
+     * Décision MLO (initiale, hard upgrade FH) — étape fh_mlo.
+     */
+    #[Route('/task/{id}/mlo-decision', name: 'user_deploiement_mlo_decision', methods: ['POST'])]
+    public function mloDecision(TicketTask $task, Request $request): Response
+    {
+        $this->denyAccessUnlessTaskBelongsToDeploiement($task);
+        if ($task->getStepCode() !== TicketTask::STEP_FH_MLO) {
+            $this->addFlash('error', 'Cette action ne concerne pas la décision MLO.');
+            return $this->redirectToRoute('user_deploiement_task_show', ['id' => $task->getId()]);
+        }
+
+        $mloDecision = strtoupper((string) $request->request->get('mlo_decision', 'OK'));
+        $comment = $request->request->get('comment');
+
+        $this->fhWorkflowService->processMloDecision($task, $mloDecision, $comment, $this->getUser());
+
+        $this->addFlash('success', 'Décision MLO enregistrée. Tâche suivante créée.');
+        return $this->redirectToRoute('user_deploiement_index');
+    }
+
+    /**
+     * Validation MLO finale (après retour du LLD Ingénierie IP) — étape
+     * fh_mlo_validation. Simple bouton de validation + commentaire.
+     */
+    #[Route('/task/{id}/mlo-validation', name: 'user_deploiement_mlo_validation', methods: ['POST'])]
+    public function mloValidation(TicketTask $task, Request $request): Response
+    {
+        $this->denyAccessUnlessTaskBelongsToDeploiement($task);
+        if ($task->getStepCode() !== TicketTask::STEP_FH_MLO_VALIDATION) {
+            $this->addFlash('error', 'Cette action ne concerne pas la validation MLO.');
+            return $this->redirectToRoute('user_deploiement_task_show', ['id' => $task->getId()]);
+        }
+
+        $comment = $request->request->get('comment');
+
+        $this->fhWorkflowService->processMloDecision($task, 'OK', $comment, $this->getUser());
+
+        $this->addFlash('success', 'MLO validé. Le site est terminé et en attente de validation superuser.');
+        return $this->redirectToRoute('user_deploiement_index');
     }
 
     #[Route('/task/{id}/site/{siteId}/decision', name: 'user_deploiement_site_decision', methods: ['POST'])]
     public function siteDecision(TicketTask $task, int $siteId, Request $request): Response
     {
         $this->denyAccessUnlessTaskBelongsToDeploiement($task);
+
+        // Les décisions MLO ont leurs propres routes dédiées désormais.
+        if (in_array($task->getStepCode(), [TicketTask::STEP_FH_MLO, TicketTask::STEP_FH_MLO_VALIDATION], true)) {
+            $this->addFlash('error', 'Utilisez le formulaire de décision MLO pour cette étape.');
+            return $this->redirectToRoute('user_deploiement_task_show', ['id' => $task->getId()]);
+        }
 
         $sites = $this->getSitesForTask($task);
         $ticketSite = null;
@@ -175,106 +223,12 @@ class UserDeploiementController extends AbstractController
         $siteDecisions = $task->getSiteDecisions() ?? [];
         $stepCode = $task->getStepCode();
 
-        // Cas 1 : Planification standard (FO ou FH soft) OU hard upgrade FH
         if ($stepCode === TicketTask::STEP_DEPLOIEMENT_PLANIFICATION || $stepCode === TicketTask::STEP_FO_DEPLOYMENT_PLANNING) {
-            // Vérifier si c'est un hard upgrade FH
-            $deploiementData = $task->getDeploiementData() ?? [];
-            if (($deploiementData['upgrade_type'] ?? '') === 'hard') {
-                // ✅ Cas hard upgrade FH : gestion MLO
-                $mloDecision = $request->request->get('mlo_decision', 'OK');
-                $comment = $request->request->get('comment');
-
-                // Sauvegarder la décision
-                $siteDecisions[$siteId] = array_merge($siteDecisions[$siteId] ?? [], [
-                    'mlo_decision' => $mloDecision,
-                    'mlo_comment' => $comment,
-                    'status' => 'mlo_traite',
-                ]);
-                $task->setSiteDecisions($siteDecisions);
-
-                // Marquer le site comme traité dans TicketSite
-                $ticketSite->setStatus('completed');
-
-                // Vérifier si tous les sites sont traités
-                $allDone = true;
-                foreach ($this->getSitesForTask($task) as $s) {
-                    if ($s->getStatus() !== 'completed') {
-                        $allDone = false;
-                        break;
-                    }
-                }
-
-                if ($allDone) {
-                    // Tous les sites sont traités : terminer la tâche de planification
-                    $task->setStatus(TicketTask::STATUS_DONE);
-                    $task->setCompletedAt(new \DateTime());
-
-                    // Créer la tâche suivante selon la décision MLO
-                    $ticket = $task->getTicket();
-                    if ($mloDecision === 'OK') {
-                        // MLO OK → Ingénierie Capillaire (étape FH_MLO)
-                        $nextUser = $this->findUserForDepartment('ingenierie_capillaire');
-                        if (!$nextUser) {
-                            $this->addFlash('error', 'Aucun utilisateur trouvé pour l\'ingénierie capillaire.');
-                            return $this->redirectToRoute('user_deploiement_task_show', ['id' => $task->getId()]);
-                        }
-                        $newTask = $this->ticketWorkflowService->moveToNextTask($task, $nextUser, TicketTask::STEP_FH_MLO);
-                        $newTask->setTitle('MLO (Déploiement Télécom)');
-                        $newTask->setServiceName('FH');
-                        $newTask->setDepartmentName('ingenierie_capillaire');
-                        $newTask->setSiteData($task->getSiteData());
-                        $newTask->setFhFields($task->getFhFields());
-                        $newTask->setDeploiementData(['upgrade_type' => 'hard']); // conserver
-
-                        $this->ticketWorkflowService->addHistory(
-                            $ticket,
-                            $this->getUser(),
-                            'task_transferred',
-                            'MLO OK, tâche transmise à Ingénierie Capillaire.'
-                        );
-                    } else {
-                        // MLO NOK → Ingénierie IP (étape FO_WO_IP_CREATION)
-                        $nextUser = $this->findUserForDepartment('ingenierie_ip');
-                        if (!$nextUser) {
-                            $this->addFlash('error', 'Aucun utilisateur trouvé pour l\'ingénierie IP.');
-                            return $this->redirectToRoute('user_deploiement_task_show', ['id' => $task->getId()]);
-                        }
-                        $newTask = $this->ticketWorkflowService->moveToNextTask($task, $nextUser, TicketTask::STEP_FO_WO_IP_CREATION);
-                        $newTask->setTitle('Création WO IP (MLO NOK)');
-                        $newTask->setServiceName('FO');
-                        $newTask->setDepartmentName('ingenierie_ip');
-                        $newTask->setSiteData($task->getSiteData());
-                        $newTask->setFhFields($task->getFhFields());
-
-                        $this->ticketWorkflowService->addHistory(
-                            $ticket,
-                            $this->getUser(),
-                            'task_transferred',
-                            'MLO NOK, tâche transmise à Ingénierie IP pour WO IP.'
-                        );
-                    }
-
-                    // Mettre à jour le ticket
-                    $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
-                    $ticket->setUpdatedAt(new \DateTime());
-                    $this->ticketWorkflowService->refreshTicketProgress($ticket);
-                    $this->em->flush();
-
-                    $this->addFlash('success', 'Décision MLO enregistrée et tâche suivante créée.');
-                } else {
-                    // Il reste des sites : rester en cours
-                    $task->setStatus(TicketTask::STATUS_IN_PROGRESS);
-                    $this->em->flush();
-                    $this->addFlash('info', 'Décision MLO enregistrée pour ce site. Il reste des sites à traiter.');
-                }
-
-                return $this->redirectToRoute('user_deploiement_task_show', ['id' => $task->getId()]);
-            }
-
-            // Sinon, planification standard (FO, FH soft, raccordement, etc.)
             $planification = $request->request->get('planification');
-            $radioOk = $request->request->get('radio_ok') ? true : false;
-            $backhaulOk = $request->request->get('backhaul_ok') ? true : false;
+            $isFoPlanning = $stepCode === TicketTask::STEP_FO_DEPLOYMENT_PLANNING
+                || ((($task->getDeploiementData() ?? [])['workflow_origin'] ?? null) === 'fo');
+            $radioOk = $isFoPlanning || (bool) $request->request->get('radio_ok');
+            $backhaulOk = $isFoPlanning || (bool) $request->request->get('backhaul_ok');
             $comment = $request->request->get('comment');
 
             $siteDecisions[$siteId] = array_merge($siteDecisions[$siteId] ?? [], [
@@ -292,16 +246,16 @@ class UserDeploiementController extends AbstractController
             if ($backhaulOk) $supports[] = 'backhaul';
             if (!empty($supports)) {
                 $this->deploiementWorkflowService->createSupportTasks($task, $planification, $comment, $supports);
-                $this->addFlash('success', 'Supports notifiés.');
+                $this->addFlash('success', $isFoPlanning
+                    ? 'Planification FO enregistrée : les supports Radio et Backhaul ont été notifiés.'
+                    : 'Supports notifiés.');
             } else {
                 $this->addFlash('warning', 'Aucun support sélectionné.');
             }
 
             $this->em->flush();
             $this->addFlash('info', 'Planification enregistrée.');
-        }
-        // Cas 2 : Exécution
-        elseif ($stepCode === TicketTask::STEP_DEPLOIEMENT_EXECUTION || $stepCode === TicketTask::STEP_FO_SITE_EXECUTION) {
+        } elseif ($stepCode === TicketTask::STEP_DEPLOIEMENT_EXECUTION || $stepCode === TicketTask::STEP_FO_SITE_EXECUTION) {
             $decision = $request->request->get('decision', 'OK');
             $comment = $request->request->get('comment');
 
@@ -321,9 +275,7 @@ class UserDeploiementController extends AbstractController
                 $this->em->flush();
                 $this->addFlash('error', 'Exécution NOK.');
             }
-        }
-        // Cas 3 : Raccordement 2ème paire
-        elseif ($stepCode === TicketTask::STEP_FO_CAPILLAIRE_DEPLOYMENT) {
+        } elseif ($stepCode === TicketTask::STEP_FO_CAPILLAIRE_DEPLOYMENT) {
             $raccordementOk = $request->request->get('raccordement_ok') === 'OK' ? 'OK' : 'NOK';
             $comment = $request->request->get('comment');
             $planification = $request->request->get('planification');
@@ -360,10 +312,23 @@ class UserDeploiementController extends AbstractController
 
     private function getSitesForTask(TicketTask $task): array
     {
+        if ($task->getTicketSite()) {
+            return [$task->getTicketSite()];
+        }
+
         $ticket = $task->getTicket();
         if (!$ticket) {
             return [];
         }
+
+        $siteIds = $task->getSiteData() ?? [];
+        if ($siteIds !== []) {
+            return array_values(array_filter(
+                $ticket->getTicketSites()->toArray(),
+                fn($site) => in_array($site->getId(), $siteIds, true)
+            ));
+        }
+
         return $ticket->getTicketSites()->toArray();
     }
 
@@ -376,16 +341,5 @@ class UserDeploiementController extends AbstractController
         if ($task->getAssignedTo()?->getId() !== $user->getId()) {
             throw $this->createAccessDeniedException('Vous n\'êtes pas assigné à cette tâche.');
         }
-    }
-
-    private function findUserForDepartment(string $department): ?User
-    {
-        $users = $this->em->getRepository(User::class)->findBy(['department' => $department]);
-        foreach ($users as $u) {
-            if (in_array('ROLE_USER', $u->getRoles(), true)) {
-                return $u;
-            }
-        }
-        return null;
     }
 }

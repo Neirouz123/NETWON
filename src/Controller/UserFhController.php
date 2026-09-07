@@ -10,6 +10,7 @@ use App\Repository\TicketTaskRepository;
 use App\Repository\ProcessedSiteRepository;
 use App\Service\TicketWorkflowService;
 use App\Service\FhWorkflowService;
+use App\Service\FoWorkflowService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\Request;
@@ -26,6 +27,7 @@ class UserFhController extends AbstractController
         private ProcessedSiteRepository $processedSiteRepo,
         private FhWorkflowService $fhWorkflowService,
         private TicketWorkflowService $ticketWorkflowService,
+        private FoWorkflowService $foWorkflowService, // AJOUT
     ) {}
 
     #[Route('/tasks', name: 'user_fh_tasks')]
@@ -52,27 +54,24 @@ class UserFhController extends AbstractController
                ->setParameter('status', $status);
         }
 
+        /** @var TicketTask[] $tasks */
         $tasks = $qb->orderBy('t.createdAt', 'DESC')
             ->getQuery()
             ->getResult();
 
-        $latestTasks = [];
-        $seenTickets = [];
+        // Construction de la map site par tâche
+        $taskSitesMap = [];
         foreach ($tasks as $task) {
-            $ticketId = $task->getTicket()->getId();
-            if (!in_array($ticketId, $seenTickets)) {
-                $seenTickets[] = $ticketId;
-                $latestTasks[] = $task;
-            }
+            $taskSitesMap[$task->getId()] = $this->getSitesForTask($task);
         }
 
-        $total = count($latestTasks);
+        $total = count($tasks);
         $pending = 0;
         $inProgress = 0;
         $blocked = 0;
         $overdue = 0;
 
-        foreach ($latestTasks as $task) {
+        foreach ($tasks as $task) {
             if ($task->getStatus() === 'pending') $pending++;
             elseif ($task->getStatus() === 'in_progress') $inProgress++;
             elseif ($task->getStatus() === 'blocked') $blocked++;
@@ -84,7 +83,7 @@ class UserFhController extends AbstractController
         }
 
         return $this->render('dashboard/user/fh/index.html.twig', [
-            'tasks' => $latestTasks,
+            'tasks' => $tasks,
             'user' => $user,
             'total' => $total,
             'pending' => $pending,
@@ -93,6 +92,7 @@ class UserFhController extends AbstractController
             'overdue' => $overdue,
             'searchQuery' => $search,
             'currentStatus' => $status,
+            'taskSitesMap' => $taskSitesMap,
         ]);
     }
 
@@ -106,7 +106,7 @@ class UserFhController extends AbstractController
 
         $user = $this->getUser();
         $ticket = $task->getTicket();
-        $allTicketSites = $ticket->getTicketSites()->toArray();
+        $allTicketSites = $this->getSitesForTask($task);
 
         if (empty($allTicketSites)) {
             $this->addFlash('warning', 'Aucun site rattaché à ce ticket.');
@@ -220,7 +220,7 @@ class UserFhController extends AbstractController
 
         $ticket = $task->getTicket();
         $ticketSite = null;
-        foreach ($ticket->getTicketSites() as $ts) {
+        foreach ($this->getSitesForTask($task) as $ts) {
             if ($ts->getId() === $siteId) {
                 $ticketSite = $ts;
                 break;
@@ -229,6 +229,10 @@ class UserFhController extends AbstractController
         if (!$ticketSite) {
             $this->addFlash('error', 'Site introuvable.');
             return $this->redirectToRoute('user_fh_task_show', ['id' => $task->getId()]);
+        }
+
+        if (!$task->getTicketSite()) {
+            $task->setTicketSite($ticketSite);
         }
 
         $siteDecisions = $task->getSiteDecisions() ?? [];
@@ -254,7 +258,7 @@ class UserFhController extends AbstractController
         $task->setFhFields(array_merge($existingFhFields, $formData));
 
         $allDone = true;
-        foreach ($ticket->getTicketSites() as $ts) {
+        foreach ($this->getSitesForTask($task) as $ts) {
             if (!isset($siteDecisions[$ts->getId()])) {
                 $allDone = false;
                 break;
@@ -265,7 +269,12 @@ class UserFhController extends AbstractController
             $task->setStatus(TicketTask::STATUS_DONE);
             $task->setCompletedAt(new \DateTime());
 
-            $this->fhWorkflowService->processFhTask($task, $decision, $formData, $user);
+            // Rediriger l'étape capillaire vers FoWorkflowService
+            if ($task->getStepCode() === TicketTask::STEP_FO_CAPILLAIRE_STUDY) {
+                $this->foWorkflowService->completeFoTask($task, $decision, 'capillaire_study', $user);
+            } else {
+                $this->fhWorkflowService->processFhTask($task, $decision, $formData, $user);
+            }
         } else {
             $task->setStatus(TicketTask::STATUS_IN_PROGRESS);
             $this->ticketWorkflowService->addHistory($ticket, $user, 'site_processed', 'Site ' . $ticketSite->getSiteName() . ' traité.');
@@ -276,5 +285,31 @@ class UserFhController extends AbstractController
 
         $this->addFlash('success', 'Site traité avec succès.');
         return $this->redirectToRoute('user_fh_task_show', ['id' => $task->getId()]);
+    }
+
+    /**
+     * Retourne la liste des sites pour une tâche donnée.
+     * Cette méthode est définie une seule fois.
+     */
+    private function getSitesForTask(TicketTask $task): array
+    {
+        if ($task->getTicketSite()) {
+            return [$task->getTicketSite()];
+        }
+
+        $ticket = $task->getTicket();
+        if (!$ticket) {
+            return [];
+        }
+
+        $siteIds = $task->getSiteData() ?? [];
+        if ($siteIds === []) {
+            return $ticket->getTicketSites()->toArray();
+        }
+
+        return array_values(array_filter(
+            $ticket->getTicketSites()->toArray(),
+            fn($site) => in_array($site->getId(), $siteIds, true)
+        ));
     }
 }

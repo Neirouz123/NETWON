@@ -4,290 +4,264 @@
 namespace App\Service;
 
 use App\Entity\Ticket;
+use App\Entity\TicketSite;
 use App\Entity\TicketTask;
 use App\Entity\User;
 use App\Repository\UserRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use Psr\Log\LoggerInterface;
 
+/**
+ * Chaîne FH complète :
+ *
+ *  fh_etude_prerequis (ingenierie_capillaire)
+ *      -> fh_maj_capacite (ingenierie_capillaire)
+ *          - capacité OK / soft upgrade -> fh_execution_wo (support_trans) [TERMINAL]
+ *          - hard upgrade              -> fh_mlo (deploiement_telecom)
+ *              - MLO OK  -> fh_validation_capillaire (ingenierie_capillaire) [TERMINAL]
+ *              - MLO NOK -> fh_lld (ingenierie_ip)
+ *                              -> fh_mlo_validation (deploiement_telecom) [TERMINAL]
+ */
 class FhWorkflowService
 {
-    private const STEP_FLOW = [
-        TicketTask::STEP_FH_ETUDE_PREREQUIS => [
-            'next' => TicketTask::STEP_FH_MAJ_CAPACITE,
-            'title' => 'MAJ Capacité',
-            'service' => 'FH',
-            'department' => 'support_fh',
-        ],
-        TicketTask::STEP_FH_MAJ_CAPACITE => [
-            'next' => TicketTask::STEP_FH_ING_TRANS_CAP,
-            'title' => 'Ingénierie Transmission Capacité',
-            'service' => 'FH',
-            'department' => 'ingenierie_capillaire',
-        ],
-        TicketTask::STEP_FH_ING_TRANS_CAP => [
-            'next' => null, // géré manuellement
-            'title' => 'Ingénierie Transmission Capacité',
-            'service' => 'FH',
-            'department' => 'ingenierie_capillaire',
-        ],
-        TicketTask::STEP_FH_MLO => [
-            'next' => TicketTask::STEP_FH_LLD,
-            'title' => 'MLO (Déploiement Télécom)',
-            'service' => 'FH',
-            'department' => 'deploiement_telecom',
-        ],
-        TicketTask::STEP_FH_LLD => [
-            'next' => TicketTask::STEP_FH_EXECUTION_WO,
-            'title' => 'LLD Port Routeur (Ingénierie IP)',
-            'service' => 'FO',
-            'department' => 'ingenierie_ip',
-        ],
-        TicketTask::STEP_FH_EXECUTION_WO => [
-            'next' => null,
-            'title' => 'Exécution WO (Support Trans)',
-            'service' => 'FO',
-            'department' => 'support_trans',
-        ],
-    ];
-
-    private const SHARED_DEPARTMENTS = [
-        'deploiement_telecom',
-        'support_radio',
-        'support_backhaul',
-    ];
+    private const TOTAL_STEPS_SOFT = 3;
+    private const TOTAL_STEPS_HARD_MLO_OK = 4;
+    private const TOTAL_STEPS_HARD_MLO_NOK = 5;
 
     public function __construct(
         private EntityManagerInterface $em,
         private TicketWorkflowService $workflowService,
         private UserRepository $userRepo,
+        private NotificationService $notificationService,
         private LoggerInterface $logger,
     ) {}
 
     public function processFhTask(TicketTask $task, string $decision, ?array $formData, User $actor): void
     {
-        $this->logger->info('FhWorkflowService: processing task', [
-            'task_id' => $task->getId(),
-            'step' => $task->getStepCode(),
-            'decision' => $decision,
-        ]);
+        $stepCode = $task->getStepCode();
+        $ticket = $task->getTicket();
+        $ticketSite = $task->getTicketSite();
 
+        $this->finishCurrentTask($task, $formData, $actor);
+
+        match ($stepCode) {
+            TicketTask::STEP_FH_ETUDE_PREREQUIS => $this->afterEtudePrerequis($task, $ticket, $ticketSite, $actor),
+            TicketTask::STEP_FH_MAJ_CAPACITE => $this->afterMajCapacite($task, $ticket, $ticketSite, $formData, $actor),
+            TicketTask::STEP_FH_EXECUTION_WO => $this->completeSiteTerminal($ticket, $ticketSite, $actor, 'Exécution WO effectuée (Support Trans).'),
+            TicketTask::STEP_FH_VALIDATION_CAPILLAIRE => $this->completeSiteTerminal($ticket, $ticketSite, $actor, 'Site validé par Ingénierie Capillaire après MLO OK.'),
+            TicketTask::STEP_FH_LLD => $this->afterLld($task, $ticket, $ticketSite, $actor),
+            default => $this->logger->warning('FhWorkflowService: étape FH inconnue', ['step' => $stepCode]),
+        };
+
+        $this->workflowService->refreshTicketProgress($ticket);
+        $this->em->flush();
+    }
+
+    public function processMloDecision(TicketTask $task, string $mloDecision, ?string $comment, User $actor): void
+    {
+        $stepCode = $task->getStepCode();
+        $ticket = $task->getTicket();
+        $ticketSite = $task->getTicketSite();
+
+        $task->setDecision($mloDecision);
+        $task->setComment($comment);
         $task->setStatus(TicketTask::STATUS_DONE);
         $task->setCompletedAt(new \DateTime());
-        $ticket = $task->getTicket();
+        $task->setUpdatedAt(new \DateTime());
 
-        if ($formData) {
-            $task->setFhFields($formData);
-        }
+        $isOk = strtoupper($mloDecision) === 'OK';
 
-        $stepCode = $task->getStepCode();
-        $nextStep = null;
-
-        $obsoleteSteps = ['fh_maj_nomenclature', 'fh_wo_nomenclature'];
-        if (in_array($stepCode, $obsoleteSteps, true)) {
-            $nextStep = null;
-            $this->logger->info('Ignoring obsolete step: ' . $stepCode);
-        } else {
-            if ($stepCode === TicketTask::STEP_FH_ETUDE_PREREQUIS) {
-                $nextStep = TicketTask::STEP_FH_MAJ_CAPACITE;
-            } elseif ($stepCode === TicketTask::STEP_FH_MAJ_CAPACITE) {
-                $nextStep = TicketTask::STEP_FH_ING_TRANS_CAP;
-            } elseif ($stepCode === TicketTask::STEP_FH_ING_TRANS_CAP) {
-                $upgradeType = $formData['type_upgrade'] ?? 'soft';
-                if (strtolower($upgradeType) === 'soft') {
-                    $nextStep = TicketTask::STEP_FH_EXECUTION_WO;
-                } else {
-                    // ✅ UPGRADE HARD → PLANIFICATION DÉPLOIEMENT
-                    $this->createDeploiementPlanningTask($ticket, $task, $actor, 'Upgrade Hard FH');
-                    return;
-                }
-            } elseif ($stepCode === TicketTask::STEP_FH_MLO) {
-                $nextStep = TicketTask::STEP_FH_LLD;
-            } elseif ($stepCode === TicketTask::STEP_FH_LLD) {
-                $nextStep = TicketTask::STEP_FH_EXECUTION_WO;
-            } elseif ($stepCode === TicketTask::STEP_FH_EXECUTION_WO) {
-                $nextStep = null;
-            } elseif ($stepCode === TicketTask::STEP_FO_CAPILLAIRE_STUDY) {
-                $faisabilite = $formData['faisabilite_ok'] ?? 'OK';
-                if ($faisabilite === 'OK') {
-                    $nextStep = TicketTask::STEP_DEPLOIEMENT_PLANIFICATION;
-                } else {
-                    $nextStep = TicketTask::STEP_FO_WO_IP_CREATION;
-                }
+        if ($stepCode === TicketTask::STEP_FH_MLO) {
+            if ($isOk) {
+                $this->advanceTo($ticket, $ticketSite, $task, TicketTask::STEP_FH_VALIDATION_CAPILLAIRE,
+                    'Validation finale (MLO OK)', 'ingenierie_capillaire', self::TOTAL_STEPS_HARD_MLO_OK,
+                    'MLO OK, tâche transmise à Ingénierie Capillaire pour validation finale.', $actor);
+            } else {
+                $this->advanceTo($ticket, $ticketSite, $task, TicketTask::STEP_FH_LLD,
+                    'LLD Port Routeur (MLO NOK)', 'ingenierie_ip', self::TOTAL_STEPS_HARD_MLO_NOK,
+                    'MLO NOK, tâche transmise à Ingénierie IP pour le LLD port routeur.', $actor);
             }
+        } elseif ($stepCode === TicketTask::STEP_FH_MLO_VALIDATION) {
+            $this->completeSiteTerminal($ticket, $ticketSite, $actor, 'MLO validé par Déploiement après LLD (Ingénierie IP).');
+        } else {
+            $this->logger->warning('FhWorkflowService::processMloDecision: étape inattendue', ['step' => $stepCode]);
         }
-
-        // Cas spécial : planification déploiement (pour FO)
-        if ($nextStep === TicketTask::STEP_DEPLOIEMENT_PLANIFICATION) {
-            $this->createDeploiementPlanningTask($ticket, $task, $actor, 'Raccordement FO (2ème paire)');
-            return;
-        }
-
-        // Cas spécial : retour WO IP
-        if ($nextStep === TicketTask::STEP_FO_WO_IP_CREATION) {
-            $this->createWoIpTaskForIngenierieIp($ticket, $task, $actor);
-            return;
-        }
-
-        if (!$nextStep) {
-            $ticket->setCurrentStep($ticket->getTotalSteps());
-            $this->workflowService->refreshTicketProgress($ticket);
-            $this->workflowService->addHistory($ticket, $actor, 'workflow_completed', 'Workflow terminé, en attente de validation superuser.');
-            $this->em->flush();
-            return;
-        }
-
-        $flowDef = self::STEP_FLOW[$nextStep] ?? null;
-        if (!$flowDef) {
-            throw new \RuntimeException("Étape suivante non définie : $nextStep");
-        }
-
-        $nextUser = $this->pickUser($flowDef['service'], $flowDef['department'], $actor);
-        $newTask = $this->workflowService->moveToNextTask($task, $nextUser, $nextStep);
-        $newTask->setTitle($flowDef['title']);
-        $newTask->setServiceName($flowDef['service']);
-        $newTask->setDepartmentName($flowDef['department']);
-        $newTask->setSiteData($task->getSiteData());
-        $newTask->setFhFields($task->getFhFields());
-
-        $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
-        $ticket->setUpdatedAt(new \DateTime());
 
         $this->workflowService->refreshTicketProgress($ticket);
-        $this->workflowService->addHistory(
-            $ticket,
-            $actor,
-            'task_transferred',
-            sprintf('Étape "%s" transmise à %s (%s).', $flowDef['title'], $nextUser->getUserIdentifier(), $flowDef['service'])
-        );
-
-        $this->em->flush();
-
-        $this->logger->info('FhWorkflowService: task transferred', [
-            'new_task_id' => $newTask->getId(),
-            'assigned_to' => $nextUser->getUserIdentifier(),
-        ]);
-    }
-
-    private function createDeploiementPlanningTask(Ticket $ticket, TicketTask $currentTask, User $actor, string $title): void
-    {
-        $nextUser = $this->pickUser('DEPLOIEMENT', 'deploiement_telecom', $actor);
-        $newTask = $this->workflowService->moveToNextTask($currentTask, $nextUser, TicketTask::STEP_DEPLOIEMENT_PLANIFICATION);
-        $newTask->setTitle('Planification - ' . $title);
-        $newTask->setServiceName('DEPLOIEMENT');
-        $newTask->setDepartmentName('deploiement_telecom');
-        $newTask->setSiteData($currentTask->getSiteData());
-        $newTask->setFhFields($currentTask->getFhFields());
-        // ✅ Stockage du type d'upgrade pour le Déploiement
-        $newTask->setDeploiementData([
-            'capillaire' => false,
-            'upgrade_type' => 'hard',  // pour identifier le cas hard FH
-        ]);
-
-        $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
-        $ticket->setUpdatedAt(new \DateTime());
-
-        $this->workflowService->refreshTicketProgress($ticket);
-        $this->workflowService->addHistory(
-            $ticket,
-            $actor,
-            'task_transferred',
-            sprintf('Étape "Planification - %s" transmise à %s (DEPLOIEMENT).', $title, $nextUser->getUserIdentifier())
-        );
-
         $this->em->flush();
     }
 
-    private function createWoIpTaskForIngenierieIp(Ticket $ticket, TicketTask $currentTask, User $actor): void
+    // ==================== Transitions internes ====================
+
+    private function afterEtudePrerequis(TicketTask $task, Ticket $ticket, ?TicketSite $ticketSite, User $actor): void
     {
-        $nextUser = $this->pickUser('FO', 'ingenierie_ip', $actor);
-        $newTask = $this->workflowService->moveToNextTask($currentTask, $nextUser, TicketTask::STEP_FO_WO_IP_CREATION);
-        $newTask->setTitle('Création WO IP');
-        $newTask->setServiceName('FO');
-        $newTask->setDepartmentName('ingenierie_ip');
-        $newTask->setSiteData($currentTask->getSiteData());
-        $newTask->setFhFields($currentTask->getFhFields());
-
-        $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
-        $ticket->setUpdatedAt(new \DateTime());
-
-        $this->workflowService->refreshTicketProgress($ticket);
-        $this->workflowService->addHistory(
-            $ticket,
-            $actor,
-            'task_transferred',
-            sprintf('Étape "Création WO IP" transmise à %s (FO).', $nextUser->getUserIdentifier())
-        );
-
-        $this->em->flush();
+        $this->advanceTo($ticket, $ticketSite, $task, TicketTask::STEP_FH_MAJ_CAPACITE,
+            'MAJ Capacité', 'ingenierie_capillaire', self::TOTAL_STEPS_SOFT,
+            'Étude des prérequis terminée, transmise pour MAJ Capacité.', $actor);
     }
 
     /**
-     * 🔧 CORRIGÉ : recherche d’un utilisateur pour un service/département donné.
-     * En dernier recours, cherche un superuser, sinon lève une exception.
+     * CORRECTION : on lit 'capacite_ok' depuis les champs FH enregistrés (étape précédente)
+     * et 'type_upgrade' depuis le formulaire actuel.
      */
-    private function pickUser(string $service, string $department, User $fallbackUser): User
+    private function afterMajCapacite(TicketTask $task, Ticket $ticket, ?TicketSite $ticketSite, ?array $formData, User $actor): void
     {
-        // 1. Recherche par département uniquement (pour les départements partagés)
-        if (in_array($department, self::SHARED_DEPARTMENTS, true)) {
-            $users = $this->userRepo->findBy(['department' => $department]);
-            foreach ($users as $u) {
-                if (in_array('ROLE_USER', $u->getRoles(), true)) {
-                    return $u;
-                }
-            }
+        $fhFields = $task->getFhFields() ?? [];
+        $capaciteOk = strtoupper((string) ($fhFields['capacite_ok'] ?? 'OK')) === 'OK';
+        $upgradeType = strtolower((string) ($formData['type_upgrade'] ?? ''));
+
+        if ($capaciteOk || $upgradeType === '' || $upgradeType === 'soft') {
+            // Capacité OK, ou upgrade soft : Support Trans exécute le WO IP.
+            $this->advanceTo($ticket, $ticketSite, $task, TicketTask::STEP_FH_EXECUTION_WO,
+                'Exécution WO IP', 'support_trans', self::TOTAL_STEPS_SOFT,
+                'Capacité OK / upgrade soft, transmis à Support Trans pour exécution WO IP.', $actor);
+            return;
         }
 
-        // 2. Recherche par service + département
-        $users = $this->userRepo->findBy(['service' => $service, 'department' => $department]);
-        foreach ($users as $u) {
-            if (in_array('ROLE_USER', $u->getRoles(), true)) {
-                return $u;
-            }
+        // Upgrade hard : Déploiement doit d'abord valider le MLO.
+        $this->advanceTo($ticket, $ticketSite, $task, TicketTask::STEP_FH_MLO,
+            'MLO (Déploiement Télécom)', 'deploiement_telecom', self::TOTAL_STEPS_HARD_MLO_OK,
+            'Upgrade hard demandé, transmis à Déploiement pour validation MLO.', $actor);
+    }
+
+    private function afterLld(TicketTask $task, Ticket $ticket, ?TicketSite $ticketSite, User $actor): void
+    {
+        $this->advanceTo($ticket, $ticketSite, $task, TicketTask::STEP_FH_MLO_VALIDATION,
+            'Validation MLO après LLD', 'deploiement_telecom', self::TOTAL_STEPS_HARD_MLO_NOK,
+            'LLD port routeur renseigné, retour à Déploiement pour valider le MLO.', $actor);
+    }
+
+    private function completeSiteTerminal(Ticket $ticket, ?TicketSite $ticketSite, User $actor, string $message): void
+    {
+        if ($ticketSite) {
+            $ticketSite->setStatus(TicketSite::STATUS_COMPLETED);
+            $ticketSite->setCurrentStepIndex($ticketSite->getTotalSteps());
+            // Créer une tâche de validation superuser pour ce site
+            $this->createSuperuserValidationForSite($ticket, $ticketSite, $actor);
+        }
+        $this->workflowService->addHistory($ticket, $actor, 'site_completed', $message, $ticketSite?->getSiteName());
+    }
+
+
+    private function finishCurrentTask(TicketTask $task, ?array $formData, User $actor): void
+    {
+        $task->setStatus(TicketTask::STATUS_DONE);
+        $task->setCompletedAt(new \DateTime());
+        $task->setUpdatedAt(new \DateTime());
+        if ($formData) {
+            $task->setFhFields(array_merge($task->getFhFields() ?? [], $formData));
+        }
+    }
+
+    private function advanceTo(
+        Ticket $ticket,
+        ?TicketSite $ticketSite,
+        TicketTask $currentTask,
+        string $nextStepCode,
+        string $title,
+        string $department,
+        int $totalStepsForBranch,
+        string $historyMessage,
+        User $actor
+    ): void {
+        $nextUser = $this->pickUserForDepartment($department);
+
+        $newTask = new TicketTask();
+        $newTask->setTicket($ticket);
+        $newTask->setTicketSite($ticketSite);
+        $newTask->setAssignedTo($nextUser);
+        $newTask->setTitle($title . ($ticketSite ? ' — ' . $ticketSite->getSiteName() : ''));
+        $newTask->setDescription($title);
+        $newTask->setServiceName('FH');
+        $newTask->setDepartmentName($department);
+        $newTask->setStepCode($nextStepCode);
+        $newTask->setStepOrder($currentTask->getStepOrder() + 1);
+        $newTask->setStatus(TicketTask::STATUS_PENDING);
+        $newTask->setSiteData($currentTask->getSiteData());
+        $newTask->setFhFields($currentTask->getFhFields());
+        $newTask->setCreatedAt(new \DateTime());
+        $newTask->setUpdatedAt(new \DateTime());
+
+        $this->em->persist($newTask);
+
+        if ($ticketSite) {
+            $ticketSite->setTotalSteps($totalStepsForBranch);
+            $ticketSite->setCurrentStepIndex(min(
+                $ticketSite->getCurrentStepIndex() + 1,
+                $totalStepsForBranch - 1
+            ));
+            $ticketSite->setCurrentStepCode($nextStepCode);
+            $ticketSite->setStatus(TicketSite::STATUS_IN_PROGRESS);
         }
 
-        // 3. Si département partagé, cherche dans l'autre service
-        if (in_array($department, self::SHARED_DEPARTMENTS, true)) {
-            $otherService = ($service === 'FO') ? 'FH' : 'FO';
-            $users = $this->userRepo->findBy(['service' => $otherService, 'department' => $department]);
-            foreach ($users as $u) {
-                if (in_array('ROLE_USER', $u->getRoles(), true)) {
-                    return $u;
-                }
-            }
+        $ticket->setUpdatedAt(new \DateTime());
+
+        $this->workflowService->addHistory($ticket, $actor, 'task_transferred', $historyMessage, $ticketSite?->getSiteName());
+
+        $this->notificationService->notify(
+            $nextUser,
+            NotificationService::TYPE_WORKFLOW_ASSIGNED,
+            sprintf('Nouvelle tâche : %s pour le ticket #%d - %s', $title, $ticket->getId() ?? 0, $ticket->getTitle()),
+            $ticket
+        );
+    }
+
+    private function pickUserForDepartment(string $department): User
+    {
+        $users = array_values(array_filter(
+            $this->userRepo->findBy(['department' => $department]),
+            fn(User $u) => in_array('ROLE_USER', $u->getRoles(), true)
+        ));
+
+        if (!empty($users)) {
+            return $users[array_rand($users)];
         }
 
-        // 4. Recherche par service uniquement
-        $users = $this->userRepo->findBy(['service' => $service]);
-        foreach ($users as $u) {
-            if (in_array('ROLE_USER', $u->getRoles(), true)) {
-                return $u;
-            }
-        }
-
-        // 5. Recherche par service 'SHARED'
-        $users = $this->userRepo->findBy(['service' => 'SHARED']);
-        foreach ($users as $u) {
-            if (in_array('ROLE_USER', $u->getRoles(), true)) {
-                return $u;
-            }
-        }
-
-        // 6. Dernier recours : chercher un superuser
         $superusers = $this->userRepo->findUsersByRole('ROLE_SUPERUSER');
         if (!empty($superusers)) {
-            $this->logger->warning('Aucun utilisateur ROLE_USER trouvé pour le service/département, utilisation d\'un superuser.', [
-                'service' => $service,
-                'department' => $department,
-                'superuser' => $superusers[0]->getUserIdentifier(),
-            ]);
+            $this->logger->warning(
+                'Aucun utilisateur trouvé pour le département {dept}, fallback sur un superuser.',
+                ['dept' => $department]
+            );
             return $superusers[0];
         }
 
-        // 7. Échec total : lever une exception pour éviter une assignation erronée
         throw new \RuntimeException(sprintf(
-            'Impossible de trouver un utilisateur pour le service "%s" et le département "%s". Veuillez créer un utilisateur avec ces attributs ou un superuser.',
-            $service, $department
+            'Impossible de trouver un utilisateur pour le département "%s". Créez un utilisateur avec ce département ou un superuser.',
+            $department
         ));
+    }
+
+
+     private function createSuperuserValidationForSite(Ticket $ticket, TicketSite $ticketSite, User $actor): void
+    {
+        $superusers = $this->userRepo->findUsersByRole('ROLE_SUPERUSER');
+        if (empty($superusers)) {
+            $this->logger->error('Aucun superuser trouvé pour la validation du site ' . $ticketSite->getSiteName());
+            return;
+        }
+        $superuser = $superusers[0]; // ou round-robin
+
+        $task = new TicketTask();
+        $task->setTicket($ticket);
+        $task->setTicketSite($ticketSite);
+        $task->setTitle('Validation superuser — ' . $ticketSite->getSiteName());
+        $task->setDescription('Vérifier la conformité du site et valider.');
+        $task->setAssignedTo($superuser);
+        $task->setServiceName('SUPERUSER');
+        $task->setDepartmentName(null);
+        $task->setStatus(TicketTask::STATUS_PENDING);
+        $task->setStepCode(TicketTask::STEP_SUPERUSER_VALIDATION);
+        $task->setStepOrder(999); // à adapter selon le contexte
+        $task->setCreatedAt(new \DateTime());
+        $task->setUpdatedAt(new \DateTime());
+
+        $this->em->persist($task);
+        $this->notificationService->notify(
+            $superuser,
+            NotificationService::TYPE_WORKFLOW_ASSIGNED,
+            'Site ' . $ticketSite->getSiteName() . ' en attente de validation (ticket #' . $ticket->getId() . ')',
+            $ticket
+        );
     }
 }

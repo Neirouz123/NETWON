@@ -1,3 +1,4 @@
+{# templates/dashboard/superuser/sites.html.twig #}
 {% extends 'dashboard/base_dashboard.html.twig' %}
 
 {% block dashboard_content %}
@@ -10,46 +11,31 @@
             <a href="{{ path('superuser_dashboard_sites', {service: 'SHARED'}) }}" class="service-tab {% if currentService == 'SHARED' %}active{% endif %}">🔄 SHARED</a>
         </div>
         <a href="{{ path('superuser_dashboard_sites_export', {
-    service: currentService,
-    classification: currentClassification,
-    status: currentStatus,
-    search: currentSearch
+    service: currentService, classification: currentClassification, status: currentStatus, search: currentSearch
 }) }}" class="btn-export">📥 Exporter</a>
     </div>
 
     <div class="card" style="margin-bottom: 20px;">
         <form method="get" action="{{ path('superuser_dashboard_sites') }}" class="filters-form">
-            {% if currentService %}
-                <input type="hidden" name="service" value="{{ currentService }}">
-            {% endif %}
-
+            {% if currentService %}<input type="hidden" name="service" value="{{ currentService }}">{% endif %}
             <div class="filter-group">
                 <label>Classification</label>
                 <select name="classification">
                     <option value="">Toutes</option>
-                    {% for class in classifications %}
-                        <option value="{{ class }}" {% if currentClassification == class %}selected{% endif %}>
-                            {{ class }}
-                        </option>
-                    {% endfor %}
+                    {% for class in classifications %}<option value="{{ class }}" {% if currentClassification == class %}selected{% endif %}>{{ class }}</option>{% endfor %}
                 </select>
             </div>
-
             <div class="filter-group">
                 <label>État / Statut</label>
                 <select name="status">
                     <option value="">Tous</option>
-                    {% for value, label in statusOptions %}
-                        <option value="{{ value }}" {% if currentStatus == value %}selected{% endif %}>{{ label }}</option>
-                    {% endfor %}
+                    {% for value, label in statusOptions %}<option value="{{ value }}" {% if currentStatus == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
                 </select>
             </div>
-
             <div class="filter-group">
                 <label>Recherche</label>
                 <input type="text" name="search" value="{{ currentSearch }}" placeholder="Nom du site...">
             </div>
-
             <div class="filter-group">
                 <button type="submit" class="btn-secondary">Filtrer</button>
                 <a href="{{ currentService ? path('superuser_dashboard_sites', {service: currentService}) : path('superuser_dashboard_sites') }}" class="btn-link">Réinitialiser</a>
@@ -62,33 +48,22 @@
             <table class="workflow-table">
                 <thead>
                     <tr>
-                        <th style="white-space: nowrap;">Site</th>
-                        <th style="white-space: nowrap;">Classif.</th>
-                        <th style="white-space: nowrap;">Type</th>
-                        <th style="white-space: nowrap;">Max TDD</th>
-                        <th style="white-space: nowrap;">Max FDD</th>
-                        <th style="white-space: nowrap;">Trafic Max</th>
-                        <th style="white-space: nowrap;">Cap TDD</th>
-                        <th style="white-space: nowrap;">Cap FDD</th>
-                        <th style="white-space: nowrap;">Taux Util.</th>
-                        <th style="white-space: nowrap;">Taux TDD</th>
-                        <th style="white-space: nowrap;">Taux FDD</th>
-                        <th style="white-space: nowrap;">Occ.</th>
-                        <th style="white-space: nowrap;">Occ. TDD</th>
-                        <th style="white-space: nowrap;">Occ. FDD</th>
-                        <th style="white-space: nowrap;">Statut</th>
-                        <th style="white-space: nowrap;">État</th>
-                        <th style="white-space: nowrap;">Drop TDD</th>
-                        <th style="white-space: nowrap;">Drop FDD</th>
-                        <th style="white-space: nowrap;">Drop TF</th>
-                        <th style="white-space: nowrap;">S1 Fail (s)</th>
-                        <th style="white-space: nowrap;">Date coupure S1</th>
-                        <th style="white-space: nowrap;">MAJ Capacité</th>
-                        <th style="white-space: nowrap;">Dernière action</th>
+                        <th>Site</th><th>Classification</th><th>Type Trans</th>
+                        <th>Max TDD (Mbps)</th><th>Max FDD (Mbps)</th><th>Trafic Max (Mbps)</th>
+                        <th>Capacité TDD (Mbps)</th><th>Capacité FDD (Mbps)</th>
+                        <th>Taux Util. Global</th><th>Taux Util. TDD</th><th>Taux Util. FDD</th>
+                        <th>Occurrences</th><th>Occurrence TDD</th><th>Occurrence FDD</th>
+                        <th>Statut (status)</th><th>État (siteStatus)</th>
+                        <th>DropCong TDD</th><th>DropCong FDD</th><th>DropCong TF</th>
+                        <th>Longitude</th><th>Latitude</th>
+                        <th>S1 Fail (s)</th><th>Date coupure S1</th>
+                        <th>MAJ Capacité</th><th>Dernière action</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for site in sites %}
+                        {% set etat = site.status is not empty ? (site.status|upper == 'SECURISE' or site.status|upper == 'SECURE' ? 'OK' : (site.status|upper == 'SURVEILLANCE' or site.status|upper == 'WARNING' ? 'SOUS_OBSERVATION' : site.status|upper)) : 'OK' %}
+                        {% set st = site.siteStatus is not empty ? (site.siteStatus|upper == 'CONGESTIONNE' ? 'CONGESTION' : site.siteStatus|upper) : 'OK' %}
                         <tr>
                             <td><strong>{{ site.siteName }}</strong></td>
                             <td>{{ site.classification ?: '-' }}</td>
@@ -104,53 +79,29 @@
                             <td>{{ site.nombreOccurrences }}</td>
                             <td>{{ site.nombreOccurrencesTdd is not null ? site.nombreOccurrencesTdd : '-' }}</td>
                             <td>{{ site.nombreOccurrencesFdd is not null ? site.nombreOccurrencesFdd : '-' }}</td>
-                            <td>{{ site.status ?: '-' }}</td>
+                            <td>{{ etat }}</td>
                             <td>
-                                {% set st = site.siteStatus %}
-                                {% if st == 'CRITIQUE' %}
-                                    <span class="badge red">Critique</span>
-                                {% elseif st == 'SURVEILLANCE' %}
-                                    <span class="badge orange">Sous obs.</span>
-                                {% elseif st == 'SECURISE' %}
-                                    <span class="badge green">Sécurisé</span>
-                                {% elseif st == 'ERREUR_EVALUATION' %}
-                                    <span class="badge gray">Erreur</span>
-                                {% else %}
-                                    <span class="badge gray">Non éval.</span>
-                                {% endif %}
+                                {% if st == 'CRITIQUE' %}<span class="badge red">Critique</span>
+                                {% elseif etat == 'SOUS_OBSERVATION' %}<span class="badge orange">Sous obs.</span>
+                                {% elseif etat == 'OK' %}<span class="badge green">OK</span>
+                                {% else %}<span class="badge gray">Non éval.</span>{% endif %}
                             </td>
                             <td>{{ site.dropCongTdd is not null ? site.dropCongTdd : '-' }}</td>
                             <td>{{ site.dropCongFdd is not null ? site.dropCongFdd : '-' }}</td>
                             <td>{{ site.dropCongTf is not null ? site.dropCongTf : '-' }}</td>
+                            <td>{{ site.longitude is not null ? site.longitude|number_format(6, '.', '') : '-' }}</td>
+                            <td>{{ site.latitude is not null ? site.latitude|number_format(6, '.', '') : '-' }}</td>
                             <td>
-                                {% if site.s1FailDuration is not null and site.s1FailDuration > 0 %}
-                                    <span class="badge s1down">{{ site.s1FailDuration|number_format(0, '.', ' ') }}s</span>
-                                {% else %}
-                                    -
-                                {% endif %}
+                                {% if site.s1FailDuration is not null and site.s1FailDuration > 0 %}<span class="badge s1down">{{ site.s1FailDuration|number_format(0, '.', ' ') }}s</span>{% else %}-{% endif %}
                             </td>
+                            <td>{{ site.s1FailDate ? site.s1FailDate|date('d/m/Y H:i') : '-' }}</td>
+                            <td>{{ site.capaciteUpdatedAt ? site.capaciteUpdatedAt|date('d/m/Y H:i') : '-' }}</td>
                             <td>
-                                {{ site.s1FailDate ? site.s1FailDate|date('d/m/Y H:i') : '-' }}
-                            </td>
-                            <td>
-                                {% if site.capaciteUpdatedAt %}
-                                    <span class="badge blue-soft">{{ site.capaciteUpdatedAt|date('d/m/Y H:i') }}</span>
-                                {% else %}
-                                    -
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if site.lastActionPerformed %}
-                                    <span title="{{ site.lastActionPerformed }}">{{ site.lastActionPerformed|length > 28 ? (site.lastActionPerformed|slice(0, 28) ~ '…') : site.lastActionPerformed }}</span>
-                                {% else %}
-                                    -
-                                {% endif %}
+                                {% if site.lastActionPerformed %}<span title="{{ site.lastActionPerformed }}">{{ site.lastActionPerformed|length > 28 ? (site.lastActionPerformed|slice(0, 28) ~ '…') : site.lastActionPerformed }}</span>{% else %}-{% endif %}
                             </td>
                         </tr>
                     {% else %}
-                        <tr>
-                            <td colspan="23" class="empty-state">Aucun site trouvé</td>
-                        </tr>
+                        <tr><td colspan="24" class="empty-state">Aucun site trouvé</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -160,15 +111,8 @@
             <div class="pagination">
                 {% for p in 1..pagination.totalPages %}
                     <a href="{{ path('superuser_dashboard_sites', {
-                        page: p,
-                        service: currentService,
-                        classification: currentClassification,
-                        status: currentStatus,
-                        search: currentSearch
-                    }) }}"
-                       class="page-link {% if p == pagination.page %}active{% endif %}">
-                        {{ p }}
-                    </a>
+                        page: p, service: currentService, classification: currentClassification, status: currentStatus, search: currentSearch
+                    }) }}" class="page-link {% if p == pagination.page %}active{% endif %}">{{ p }}</a>
                 {% endfor %}
             </div>
         {% endif %}
@@ -176,131 +120,28 @@
 </div>
 
 <style>
-.service-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 25px;
-    flex-wrap: wrap;
-    gap: 10px;
-}
-
-.service-tabs {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-bottom: 0;
-}
-
-.service-tab {
-    padding: 8px 20px;
-    border-radius: 30px;
-    text-decoration: none;
-    font-weight: 600;
-    background: #f1f5f9;
-    color: #475569;
-    transition: all 0.2s;
-}
-.service-tab.active {
-    background: #3b82f6;
-    color: white;
-}
-
-.btn-export {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: #f8d7da;
-    color: #721c24;
-    padding: 8px 20px;
-    border-radius: 30px;
-    text-decoration: none;
-    font-weight: 700;
-    font-size: 14px;
-    border: 1px solid #f5c6cb;
-    transition: background 0.2s, border-color 0.2s;
-    white-space: nowrap;
-}
-.btn-export:hover {
-    background: #f8d4d9;
-    border-color: #e0a6ad;
-    color: #721c24;
-    text-decoration: none;
-}
-
-.filters-form {
-    display: flex;
-    gap: 20px;
-    flex-wrap: wrap;
-    align-items: flex-end;
-}
-.filter-group {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-.filter-group label {
-    font-size: 12px;
-    font-weight: 600;
-    color: #64748b;
-}
-.filter-group select,
-.filter-group input {
-    padding: 8px 12px;
-    border: 1px solid #cbd5e1;
-    border-radius: 8px;
-    min-width: 150px;
-}
-.btn-secondary {
-    background: #f1f5f9;
-    border: 1px solid #cbd5e1;
-    padding: 8px 16px;
-    border-radius: 8px;
-    cursor: pointer;
-}
-.btn-link {
-    padding: 8px 16px;
-    color: #64748b;
-    text-decoration: none;
-}
-.pagination {
-    margin-top: 20px;
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-    flex-wrap: wrap;
-}
-.page-link {
-    padding: 6px 12px;
-    border: 1px solid #cbd5e1;
-    border-radius: 6px;
-    text-decoration: none;
-    color: #3b82f6;
-}
-.page-link.active {
-    background: #3b82f6;
-    color: white;
-    border-color: #86b1f5;
-}
-.badge {
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-}
+.service-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; flex-wrap: wrap; gap: 10px; }
+.service-tabs { display: flex; gap: 10px; flex-wrap: wrap; }
+.service-tab { padding: 8px 20px; border-radius: 30px; text-decoration: none; font-weight: 600; background: #f1f5f9; color: #475569; }
+.service-tab.active { background: #3b82f6; color: white; }
+.btn-export { display: inline-flex; align-items: center; gap: 8px; background: #f8d7da; color: #721c24; padding: 8px 20px; border-radius: 30px; text-decoration: none; font-weight: 700; font-size: 14px; border: 1px solid #f5c6cb; white-space: nowrap; }
+.filters-form { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-end; }
+.filter-group { display: flex; flex-direction: column; gap: 6px; }
+.filter-group label { font-size: 12px; font-weight: 600; color: #64748b; }
+.filter-group select, .filter-group input { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 8px; min-width: 150px; }
+.btn-secondary { background: #f1f5f9; border: 1px solid #cbd5e1; padding: 8px 16px; border-radius: 8px; cursor: pointer; }
+.btn-link { padding: 8px 16px; color: #64748b; text-decoration: none; }
+.pagination { margin-top: 20px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.page-link { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; text-decoration: none; color: #3b82f6; }
+.page-link.active { background: #3b82f6; color: white; border-color: #86b1f5; }
+.badge { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
 .badge.red { background: #fee2e2; color: #dc2626; }
 .badge.orange { background: #ffedd5; color: #ea580c; }
 .badge.green { background: #dcfce7; color: #16a34a; }
 .badge.gray { background: #f1f5f9; color: #64748b; }
-.badge.blue-soft { background: #eff6ff; color: #1d4ed8; border-radius: 8px; padding: 3px 8px; font-weight: 600; font-size: 12px; }
 .badge.s1down { background: #450a0a; color: #fecaca; border-radius: 8px; padding: 3px 8px; font-weight: 700; font-size: 12px; }
-
-.workflow-table {
-    font-size: 12px;
-}
-.workflow-table th,
-.workflow-table td {
-    padding: 6px 8px;
-}
+.workflow-table { font-size: 12px; }
+.workflow-table th, .workflow-table td { padding: 6px 8px; white-space: nowrap; }
+.table-responsive { overflow-x: auto; }
 </style>
 {% endblock %}

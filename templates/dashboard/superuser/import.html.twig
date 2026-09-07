@@ -2,20 +2,17 @@
 
 {% block dashboard_content %}
 <div class="import-page">
-    <div class="page-header">
-    </div>
-
     <div class="card mb-10">
         <div class="card-header">
             <h3 class="card-title">📊 Import global des sites</h3>
             <p class="card-desc">
-                Fichier trafic unique attendu avec les colonnes suivantes :
-                <code>Time</code>, <code>eNodeB Name</code>, <code>Integrity</code>,
-                <code>L.Cell.Unavail.Dur.Sys.S1Fail(s)</code>,
+                Fichier trafic attendu : <code>Time</code>, <code>eNodeB Name</code>,
+                <code>Integrity</code>, <code>L.Cell.Unavail.Dur.Sys.S1Fail(s)</code>,
                 <code>VS.FEGE.RxMaxSpeed_Mbs(Mbit/s)</code>,
                 <code>VS.RscGroup.FlowCtrol.DL.DropCong.DownBWNum</code>.
-                Le trafic, le KPI DropCong et le KPI d'indisponibilité S1 sont désormais
-                extraits automatiquement de ce même fichier — plus besoin d'un fichier séparé.
+                Fichier Port : détermine la capacité FO et la classification
+                (TF / COTRANS / NO_COTRANS / ONLY_FDD). Fichier Liaison :
+                détermine le type de liaison (FO / FH / Backbone).
             </p>
         </div>
         <div class="card-body">
@@ -24,12 +21,12 @@
                     <div class="form-group">
                         <label>Fichier Traffic <span class="required">*</span></label>
                         <input type="file" name="trafic_file" accept=".xlsx,.xls,.csv" required>
-                        <small>Données de trafic + DropCong + indisponibilité S1 (obligatoire)</small>
+                        <small>Trafic + DropCong + S1 (obligatoire)</small>
                     </div>
                     <div class="form-group">
                         <label>Fichier Ports</label>
                         <input type="file" name="port_file" accept=".xlsx,.xls,.csv">
-                        <small>Capacités par port (optionnel)</small>
+                        <small>Capacité + classification (optionnel)</small>
                     </div>
                     <div class="form-group">
                         <label>Fichier Liaison</label>
@@ -76,30 +73,24 @@
         </div>
     </div>
 
-    {# ✅ Bloc DropCong conservé uniquement pour compatibilité/legacy :
-       le KPI DropCong (VS.RscGroup.FlowCtrol.DL.DropCong.DownBWNum) est
-       désormais lu automatiquement depuis le fichier Trafic ci-dessus.
-       Cet import séparé n'est plus nécessaire dans le flux normal. #}
-    <div class="card" style="opacity:0.85;">
+    {# ✅ Point (e) : remplace le bloc DropCong (désormais lu automatiquement
+       depuis le fichier trafic) par l'import des coordonnées GPS. #}
+    <div class="card">
         <div class="card-header">
-            <h3 class="card-title">📉 Importer les KPIs DropCong (legacy, optionnel)</h3>
-            <p class="card-desc">
-                ⚠️ Le KPI DropCong est maintenant extrait automatiquement du fichier Trafic
-                (colonne VS.RscGroup.FlowCtrol.DL.DropCong.DownBWNum). Cet import séparé
-                n'est conservé que pour un usage exceptionnel/rétro-compatibilité.
-            </p>
+            <h3 class="card-title">📍 Importer les coordonnées GPS</h3>
+            <p class="card-desc">Fichier contenant les colonnes Site, Latitude, Longitude — utilisé pour l'affichage des sites sur la carte.</p>
         </div>
         <div class="card-body">
-            <form method="post" action="{{ path('superuser_import_dropcong') }}" enctype="multipart/form-data">
+            <form method="post" action="{{ path('superuser_import_gps') }}" enctype="multipart/form-data">
                 <div class="form-grid" style="grid-template-columns: 1fr;">
                     <div class="form-group">
-                        <label>Fichier DropCong</label>
-                        <input type="file" name="fichier" accept=".xlsx,.xls,.csv">
-                        <small>Optionnel — uniquement si vous devez recalculer le DropCong indépendamment du prochain import trafic.</small>
+                        <label>Fichier GPS <span class="required">*</span></label>
+                        <input type="file" name="gps_file" accept=".xlsx,.xls,.csv" required>
+                        <small>Colonnes attendues : Site / Latitude / Longitude</small>
                     </div>
                 </div>
                 <div class="form-actions">
-                    <button type="submit" class="btn-secondary">📤 Importer DropCong (legacy)</button>
+                    <button type="submit" class="btn-secondary">📤 Importer GPS</button>
                 </div>
             </form>
         </div>
@@ -108,9 +99,6 @@
 
 <style>
 .import-page { padding-bottom: 40px; }
-.page-header { margin-bottom: 30px; }
-.page-title { font-size: 28px; font-weight: 700; color: #07152f; margin: 0; }
-.page-desc { color: #60708a; margin-top: 6px; }
 .card { background: white; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 30px; overflow: hidden; }
 .card-header { padding: 24px 28px 0 28px; }
 .card-title { font-size: 20px; font-weight: 700; margin-bottom: 6px; color: #0f172a; }

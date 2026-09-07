@@ -2,117 +2,37 @@
 
 namespace App\Controller;
 
-use App\Entity\Notification;
 use App\Entity\Ticket;
-use App\Entity\TicketComment;
-use App\Entity\TicketTask;
-use App\Entity\User;
-use App\Entity\Service;
-use App\Repository\ServiceRepository;
-use App\Repository\UserRepository;
-use App\Service\NotificationService;
-use Doctrine\ORM\EntityManagerInterface;
-use Symfony\Component\Form\FormInterface;
-use Symfony\Component\HttpFoundation\File\UploadedFile;
-use Symfony\Component\HttpFoundation\Request;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Routing\Attribute\Route;
 
-trait WorkflowControllerTrait
+#[Route('/user/workflow')]
+class UserWorkflowController extends AbstractController
 {
-    protected function saveComment(
-        Ticket $ticket,
-        FormInterface $form,
-        Request $request,
-        EntityManagerInterface $em,
-        NotificationService $notificationService
-    ): void {
-        if (! $form->isSubmitted() || ! $form->isValid()) {
-            return;
-        }
+    #[Route('/{id}', name: 'user_workflow_show')]
+    public function show(Ticket $ticket): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_USER');
 
-        /** @var User $user */
+        /** @var \App\Entity\User $user */
         $user = $this->getUser();
-        $data = $form->getData();
 
-        $comment = new TicketComment();
-        $comment->setTicket($ticket);
-        $comment->setUser($user);
-        $comment->setMessage($data['message'] ?? '');
-
-        $file = $form->get('filePath')->getData();
-        if ($file instanceof UploadedFile) {
-            $filename = uniqid('comment_', true) . '.' . $file->guessExtension();
-            $file->move($this->getParameter('kernel.project_dir') . '/public/uploads/ticket_proofs', $filename);
-            $comment->setFilePath($filename);
-        }
-
-        $em->persist($comment);
-        $em->flush();
-
-        $notificationService->notify(
-            $ticket->getCreatedBy(),
-            Notification::TYPE_TICKET_STATUS_CHANGED,
-            sprintf('Un nouveau commentaire a été ajouté au ticket #%d.', $ticket->getId()),
-            $ticket
-        );
-    }
-
-    protected function saveCommentFromRequest(
-        Ticket $ticket,
-        Request $request,
-        EntityManagerInterface $em,
-        NotificationService $notificationService
-    ): void {
-        $message = trim((string) $request->request->get('comment', ''));
-        if ($message === '') {
-            return;
-        }
-
-        /** @var User $user */
-        $user = $this->getUser();
-        $comment = new TicketComment();
-        $comment->setTicket($ticket);
-        $comment->setUser($user);
-        $comment->setMessage($message);
-
-        $file = $request->files->get('comment_file');
-        if ($file instanceof UploadedFile) {
-            $filename = uniqid('comment_', true) . '.' . $file->guessExtension();
-            $file->move($this->getParameter('kernel.project_dir') . '/public/uploads/comments', $filename);
-            $comment->setFilePath($filename);
-        }
-
-        $em->persist($comment);
-        $em->flush();
-
-        $notificationService->notify(
-            $ticket->getCreatedBy(),
-            Notification::TYPE_TICKET_STATUS_CHANGED,
-            sprintf('Un nouveau commentaire a été ajouté au ticket #%d.', $ticket->getId()),
-            $ticket
-        );
-    }
-
-    protected function handleFileUpload(UploadedFile $file, string $directory): string
-    {
-        $filename = uniqid('upload_', true) . '.' . $file->guessExtension();
-        $file->move($directory, $filename);
-        return $filename;
-    }
-
-    protected function getUsersByRole(string $role, UserRepository $userRepository): array
-    {
-        return array_filter($userRepository->findAll(), fn(User $user) => in_array($role, $user->getRoles(), true));
-    }
-
-    protected function getServiceChoices(ServiceRepository $serviceRepository): array
-    {
-        $services = $serviceRepository->findAllOrdered();
-        $choices = [];
-        foreach ($services as $service) {
-            if ($service instanceof Service) {
-                $choices[$service->getName()] = $service->getName();
+        // Vérifier que l'utilisateur est assigné à au moins une tâche du ticket
+        $isAssigned = false;
+        foreach ($ticket->getTasks() as $task) {
+            if ($task->getAssignedTo() && $task->getAssignedTo()->getId() === $user->getId()) {
+                $isAssigned = true;
+                break;
             }
         }
-        return $choices;
+
+        if (!$isAssigned) {
+            throw $this->createAccessDeniedException('Vous n\'êtes pas autorisé à voir ce ticket.');
+        }
+
+        return $this->render('dashboard/user/workflow/show.html.twig', [
+            'ticket' => $ticket,
+        ]);
     }
 }

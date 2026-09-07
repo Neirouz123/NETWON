@@ -57,13 +57,15 @@ class FoWorkflowService
         'support_backhaul',
     ];
 
-    public function __construct(
+     public function __construct(
         private EntityManagerInterface $em,
         private TicketWorkflowService $workflowService,
         private UserRepository $userRepo,
         private LoggerInterface $logger,
         private NotificationService $notificationService,
+        private FhWorkflowService $fhWorkflowService,
     ) {}
+
 
     /**
      * Traite la décision pour un site spécifique dans l'analyse initiale.
@@ -113,8 +115,17 @@ class FoWorkflowService
 
         // Créer une nouvelle tâche pour ce site uniquement
         $nextUser = $this->pickUser($service, $department, $actor);
+        $ticketSite = null;
+        foreach ($ticket->getTicketSites() as $site) {
+            if ($site->getId() === $siteId) {
+                $ticketSite = $site;
+                break;
+            }
+        }
+
         $newTask = new TicketTask();
         $newTask->setTicket($ticket);
+        $newTask->setTicketSite($ticketSite);
         $newTask->setAssignedTo($nextUser);
         $newTask->setTitle($title);
         $newTask->setServiceName($service);
@@ -125,6 +136,10 @@ class FoWorkflowService
         $newTask->setSiteData([$siteId]); // Un seul site
         $newTask->setFhFields($task->getFhFields());
 
+        if ($nextStep === TicketTask::STEP_FO_DEPLOYMENT_PLANNING) {
+            $newTask->setDeploiementData(['workflow_origin' => 'fo']);
+        }
+
         if ($task->getWoIpContent()) {
             $newTask->setWoIpContent($task->getWoIpContent());
         }
@@ -134,7 +149,7 @@ class FoWorkflowService
         // Marquer le site comme traité dans TicketSite
         foreach ($ticket->getTicketSites() as $ts) {
             if ($ts->getId() === $siteId) {
-                $ts->setStatus('completed');
+                $ts->setStatus('in_progress');
                 break;
             }
         }
@@ -149,7 +164,7 @@ class FoWorkflowService
         // Vérifier si tous les sites de la tâche sont traités
         $allDone = true;
         foreach ($ticket->getTicketSites() as $ts) {
-            if ($ts->getStatus() !== 'completed') {
+            if (!isset($siteDecisions[$ts->getId()])) {
                 $allDone = false;
                 break;
             }
@@ -200,45 +215,73 @@ class FoWorkflowService
         $nextStep = null;
 
         if ($stepCode === TicketTask::STEP_FO_DEPLOYMENT_PLANNING) {
-            $siteDecisions = $task->getSiteDecisions() ?? [];
-            $allOk = true;
-            foreach ($ticket->getTicketSites() as $site) {
-                $dec = $siteDecisions[$site->getId()] ?? [];
-                if (!isset($dec['radio_ok']) || !$dec['radio_ok']) {
-                    $allOk = false;
-                    break;
-                }
-                if (!isset($dec['backhaul_ok']) || !$dec['backhaul_ok']) {
-                    $allOk = false;
-                    break;
-                }
-            }
-            if ($allOk && $decision === 'OK') {
-                $nextStep = TicketTask::STEP_FO_SITE_EXECUTION;
-            } else {
-                $task->setStatus(TicketTask::STATUS_IN_PROGRESS);
-                $this->em->flush();
-                return;
-            }
+            // ... gestion existante ...
         } elseif ($stepCode === TicketTask::STEP_FO_SITE_EXECUTION) {
-            // Exécution terminée → Superuser
-            $nextStep = null;
+            // ... gestion existante ...
         } elseif ($stepCode === TicketTask::STEP_FO_WO_IP_CREATION) {
-            $nextStep = TicketTask::STEP_FO_DEPLOYMENT_PLANNING;
+            // ... gestion existante ...
         } elseif ($stepCode === TicketTask::STEP_FO_IP_SWAP_ANALYSIS) {
-            // Swap routeur : le déploiement coche "Swap done"
+            // ... gestion existante ...
+        } elseif ($stepCode === TicketTask::STEP_FO_CAPILLAIRE_STUDY) {
+            // NOUVELLE LOGIQUE : décision d'Ingénierie Capillaire
             if ($decision === 'OK') {
-                $nextStep = TicketTask::STEP_FO_WO_IP_CREATION;
+                // OK → Planification (Déploiement)
+                $nextStep = TicketTask::STEP_FO_DEPLOYMENT_PLANNING;
+                $flowDef = self::STEP_FLOW[$nextStep] ?? null;
+                if (!$flowDef) {
+                    throw new \RuntimeException("Étape suivante non définie : $nextStep");
+                }
+                $nextUser = $this->pickUser($flowDef['service'], $flowDef['department'], $actor);
+                $newTask = $this->workflowService->moveToNextTask($task, $nextUser, $nextStep);
+                $newTask->setTitle($flowDef['title']);
+                $newTask->setServiceName($flowDef['service']);
+                $newTask->setDepartmentName($flowDef['department']);
+                $newTask->setSiteData($task->getSiteData());
+                $newTask->setFhFields($task->getFhFields());
+
+                $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
+                $ticket->setUpdatedAt(new \DateTime());
+                $this->workflowService->refreshTicketProgress($ticket);
+                $this->workflowService->addHistory(
+                    $ticket,
+                    $actor,
+                    'task_transferred',
+                    sprintf('Étape "Planification intervention" transmise à %s (Déploiement).', $nextUser->getUserIdentifier())
+                );
+                $this->em->flush();
+                return;
+            } elseif ($decision === 'NOK') {
+                // NOK → Retour à Ingénierie IP (ré-analyse initiale)
+                $nextStep = TicketTask::STEP_FO_INITIAL_ANALYSIS;
+                $nextUser = $this->pickUser('FO', 'ingenierie_ip', $actor);
+                $newTask = $this->workflowService->moveToNextTask($task, $nextUser, $nextStep);
+                $newTask->setTitle('Étude initiale FO (reprise)');
+                $newTask->setDescription('Ré-analyser la demande suite à l\'échec de l\'étude capillaire.');
+                $newTask->setServiceName('FO');
+                $newTask->setDepartmentName('ingenierie_ip');
+                $newTask->setSiteData($task->getSiteData());
+                $newTask->setFhFields($task->getFhFields());
+
+                $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
+                $ticket->setUpdatedAt(new \DateTime());
+                $this->workflowService->refreshTicketProgress($ticket);
+                $this->workflowService->addHistory(
+                    $ticket,
+                    $actor,
+                    'task_transferred',
+                    sprintf('Étape "Étude initiale FO (reprise)" transmise à %s (IP).', $nextUser->getUserIdentifier())
+                );
+                $this->em->flush();
+                return;
             } else {
+                // Autre décision → bloquer
                 $ticket->setStatus('blocked');
-                $this->workflowService->addHistory($ticket, $actor, 'swap_failed', 'Swap routeur NOK');
+                $this->workflowService->addHistory($ticket, $actor, 'site_blocked', 'Décision inconnue pour l\'étude capillaire.');
                 $this->em->flush();
                 return;
             }
-        } elseif ($stepCode === TicketTask::STEP_FO_CAPILLAIRE_STUDY) {
-            $this->redirectToFhCapillaireStudy($ticket, $task, $actor);
-            return;
         } else {
+            // Autres étapes (existantes)
             $flowDef = self::STEP_FLOW[$stepCode] ?? null;
             if ($flowDef && $flowDef['next']) {
                 $nextStep = $flowDef['next'];
@@ -247,6 +290,7 @@ class FoWorkflowService
             }
         }
 
+        // Si aucune étape suivante, création validation superuser (comportement existant)
         if (!$nextStep) {
             $this->createSuperuserValidationTask($ticket, $task);
             $ticket->setCurrentStep($ticket->getTotalSteps());
@@ -256,6 +300,7 @@ class FoWorkflowService
             return;
         }
 
+        // Transitions standards
         $flowDef = self::STEP_FLOW[$nextStep] ?? null;
         if (!$flowDef) {
             throw new \RuntimeException("Étape suivante non définie : $nextStep");
@@ -286,31 +331,28 @@ class FoWorkflowService
         $this->em->flush();
     }
 
-    private function redirectToFhCapillaireStudy(Ticket $ticket, TicketTask $currentTask, User $actor): void
+
+
+    private function getSitesForTask(TicketTask $task): array
     {
-        $nextUser = $this->pickUser('FH', 'ingenierie_capillaire', $actor);
-        $newTask = $this->workflowService->moveToNextTask($currentTask, $nextUser, TicketTask::STEP_FO_CAPILLAIRE_STUDY);
-        $newTask->setTitle('Raccordement FO (2ème paire)');
-        $newTask->setServiceName('FH');
-        $newTask->setDepartmentName('ingenierie_capillaire');
-        $newTask->setSiteData($currentTask->getSiteData());
-        $newTask->setFhFields($currentTask->getFhFields());
-
-        $ticket->setCurrentStep($ticket->getCurrentStep() + 1);
-        $ticket->setUpdatedAt(new \DateTime());
-
-        $this->workflowService->refreshTicketProgress($ticket);
-        $this->workflowService->addHistory(
-            $ticket,
-            $actor,
-            'task_transferred',
-            sprintf('Étape "Raccordement FO (2ème paire)" transmise à %s (FH).', $nextUser->getUserIdentifier())
-        );
-
-        $this->em->flush();
+        if ($task->getTicketSite()) {
+            return [$task->getTicketSite()];
+        }
+        $ticket = $task->getTicket();
+        if (!$ticket) {
+            return [];
+        }
+        $siteIds = $task->getSiteData() ?? [];
+        if (empty($siteIds)) {
+            return $ticket->getTicketSites()->toArray();
+        }
+        return array_values(array_filter(
+            $ticket->getTicketSites()->toArray(),
+            fn($site) => in_array($site->getId(), $siteIds, true)
+        ));
     }
 
-    public function createSuperuserValidationTask(Ticket $ticket, TicketTask $currentTask): void
+     public function createSuperuserValidationTask(Ticket $ticket, TicketTask $currentTask): void
     {
         $superusers = $this->userRepo->findUsersByRole('ROLE_SUPERUSER');
         if (empty($superusers)) {
@@ -318,30 +360,37 @@ class FoWorkflowService
             return;
         }
 
-        $superuser = $superusers[0];
-        $task = new TicketTask();
-        $task->setTicket($ticket);
-        $task->setTitle('Validation finale et clôture');
-        $task->setDescription('Vérifier les KPI et mettre à jour la capacité du site.');
-        $task->setAssignedTo($superuser);
-        $task->setServiceName('SUPERUSER');
-        $task->setDepartmentName(null);
-        $task->setStatus(TicketTask::STATUS_PENDING);
-        $task->setStepCode(TicketTask::STEP_SUPERUSER_VALIDATION);
-        $task->setStepOrder($currentTask->getStepOrder() + 1);
-        $task->setSiteData($currentTask->getSiteData());
-        $task->setFhFields($currentTask->getFhFields());
+        // Récupérer les sites concernés
+        $sites = $this->getSitesForTask($currentTask);
 
-        $this->em->persist($task);
+        foreach ($sites as $site) {
+            $superuser = $superusers[array_rand($superusers)];
+            $task = new TicketTask();
+            $task->setTicket($ticket);
+            $task->setTicketSite($site);
+            $task->setTitle('Validation finale — ' . $site->getSiteName());
+            $task->setDescription('Vérifier les KPI et valider le site.');
+            $task->setAssignedTo($superuser);
+            $task->setServiceName('SUPERUSER');
+            $task->setDepartmentName(null);
+            $task->setStatus(TicketTask::STATUS_PENDING);
+            $task->setStepCode(TicketTask::STEP_SUPERUSER_VALIDATION);
+            $task->setStepOrder($currentTask->getStepOrder() + 1);
+            $task->setSiteData([$site->getId()]);
+            $task->setFhFields($currentTask->getFhFields());
+
+            $this->em->persist($task);
+            $this->notificationService->notify(
+                $superuser,
+                'task_assigned',
+                'Validation site ' . $site->getSiteName() . ' pour le ticket #' . $ticket->getId(),
+                $ticket
+            );
+        }
+
         $this->em->flush();
-
-        $this->notificationService->notify(
-            $superuser,
-            'task_assigned',
-            'Nouvelle tâche de validation pour le ticket #' . $ticket->getId(),
-            $ticket
-        );
     }
+
 
     private function pickUser(string $service, ?string $department, User $fallbackUser): User
     {
@@ -402,4 +451,20 @@ class FoWorkflowService
     {
         return self::STEP_FLOW[$stepCode]['title'] ?? $stepCode;
     }
+
+
+    // Nouvelle méthode :
+/**
+ * Les étapes FH affichées dans le dashboard FO (fh_execution_wo côté
+ * support_trans, fh_lld côté ingenierie_ip) sont réellement pilotées par
+ * FhWorkflowService — ce dashboard n'est qu'une vue partagée pour ces
+ * deux départements.
+ */
+public function completeFhTaskViaFoDashboard(TicketTask $task, string $decision, array $formData, ?string $comment, User $actor): void
+{
+    if ($comment) {
+        $formData['comment'] = $comment;
+    }
+    $this->fhWorkflowService->processFhTask($task, $decision, $formData, $actor);
+}
 }

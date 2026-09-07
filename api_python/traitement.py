@@ -41,7 +41,25 @@ def a_suffixe_connu(site: str) -> bool:
     return est_site_tf(site) or est_site_tdd(site) or est_site_fdd(site)
 
 def normaliser_type_trans(valeur: str) -> str:
-    return str(valeur).strip()
+    valeur = str(valeur or '').strip().upper()
+    valeur = re.sub(r'\s+', ' ', valeur)
+    if valeur in ('', 'NONE', 'N/A', 'NA', '-', 'UNKNOWN', 'NON_DEFINI', 'NAN'):
+        return 'NON_DEFINI'
+    if 'FO' in valeur or 'FIBRE' in valeur or 'OPTIQUE' in valeur:
+        return 'FO'
+    if valeur in ('FH', 'FAISCEAU HERTZIEN', 'RADIO') or valeur.startswith('FH '):
+        return 'FH'
+    if 'BACKBONE' in valeur or valeur.startswith('BH'):
+        return 'BACKBONE'
+    return valeur
+
+def normaliser_classification(valeur: str) -> str:
+    valeur = str(valeur or '').strip().upper().replace('_', '-').replace(' ', '-')
+    if valeur in ('NO-COTRANS', 'NON-COTRANS'):
+        return 'NON-COTRANS'
+    if valeur in ('ONLY-FDD', 'FDD'):
+        return 'ONLY-FDD'
+    return valeur if valeur in ('TF', 'COTRANS') else ''
 
 def extraire_prefixe(site: str) -> str:
     if not site or (isinstance(site, float) and pd.isna(site)):
@@ -126,6 +144,13 @@ def get_type_trans_for_prefix(prefix, type_dict, capacite_dict=None):
                 return capacite_dict[key]
     return 'NON_DEFINI'
 
+def get_type_trans_for_site(site, type_dict, capacite_dict=None):
+    """Résout d'abord le nom exact, puis le préfixe et ses parents."""
+    site = str(site or '').strip().upper()
+    if site in type_dict:
+        return type_dict[site]
+    return get_type_trans_for_prefix(extraire_prefixe(site), type_dict, capacite_dict)
+
 # ========== CAPACITÉS ==========
 
 def resolve_capacites_tdd_fdd(classification, site_tf, site_tdd, site_fdd, site_simple, prefix, capacites_from_ports):
@@ -150,7 +175,7 @@ def resolve_capacites_tdd_fdd(classification, site_tf, site_tdd, site_fdd, site_
 
     if cap_tdd <= 0 and cap_fdd <= 0 and prefix in capacites_from_ports:
         fallback = _capacity_value(capacites_from_ports, prefix)
-        if classification in ('TF', 'ONLY_FDD', 'FDD', '-'):
+        if classification in ('TF', 'ONLY-FDD', 'FDD', '-'):
             cap_fdd = fallback
         else:
             cap_tdd = fallback
@@ -163,7 +188,7 @@ def effective_capacity_for_utilization(classification, cap_tdd, cap_fdd, fallbac
     cap_fdd = float(cap_fdd or 0)
     fallback = float(fallback or 0)
 
-    if classification in ('TF', 'ONLY_FDD', 'FDD', '-'):
+    if classification in ('TF', 'ONLY-FDD', 'FDD', '-'):
         return cap_fdd if cap_fdd > 0 else fallback
 
     total = max(cap_tdd, cap_fdd)
@@ -178,11 +203,11 @@ def calculer_taux_utilisation_complet(max_trafic, max_tdd, max_fdd, capacite_tdd
     taux_tdd = round((max_tdd / capacite_tdd) * 100, 2) if capacite_tdd > 0 and max_tdd > 0 else None
     taux_fdd = round((max_fdd / capacite_fdd) * 100, 2) if capacite_fdd > 0 and max_fdd > 0 else None
 
-    if classification in ('COTRANS', 'NO_COTRANS'):
+    if classification in ('COTRANS', 'NON-COTRANS', 'NO_COTRANS'):
         return {'taux_utilisation': None, 'taux_utilisation_tdd': taux_tdd, 'taux_utilisation_fdd': taux_fdd}
 
     taux_global = None
-    if classification in ('TF', 'ONLY_FDD', 'FDD', '-'):
+    if classification in ('TF', 'ONLY-FDD', 'FDD', '-'):
         if capacite_fdd > 0 and max_trafic > 0:
             taux_global = round((max_trafic / capacite_fdd) * 100, 2)
         elif capacite_globale > 0 and max_trafic > 0:
@@ -458,11 +483,16 @@ def charger_port_data_as_dict():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+        cur.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'port_data')")
+        if not cur.fetchone()[0]:
+            cur.close(); conn.close()
+            return {}
+        cur.execute("ALTER TABLE port_data ADD COLUMN IF NOT EXISTS classification VARCHAR(50)")
         suffix_pattern = r'_(LMB|LM2|LM|TDD|TC|TD|TF|FDD|TT|BH|BO|TR|OO|OR)(_[A-Z0-9]+)*$'
         cur.execute("""
-            SELECT site, port_no, trafic, date_import
+            SELECT site, port_no, trafic, date_import, classification
             FROM (
-                SELECT site, port_no, trafic, date_import,
+                SELECT site, port_no, trafic, date_import, classification,
                        MAX(date_import) OVER (PARTITION BY UPPER(REGEXP_REPLACE(site, %s, '', 'i'))) AS latest_site_date,
                        ROW_NUMBER() OVER (PARTITION BY UPPER(site), port_no, date_import ORDER BY id DESC) AS row_num
                 FROM port_data
@@ -473,11 +503,12 @@ def charger_port_data_as_dict():
         rows = cur.fetchall()
         cur.close(); conn.close()
         port_info = {}
-        for site, port_no, trafic, date_import in rows:
+        for site, port_no, trafic, date_import, classification in rows:
             s = str(site).strip().upper()
             if s not in port_info:
-                port_info[s] = {'port0': 0, 'port1': 0, 'date': None}
+                port_info[s] = {'port0': 0, 'port1': 0, 'date': None, 'classification': ''}
             port_info[s]['date'] = max(_parse_import_date(port_info[s].get('date')), _parse_import_date(date_import))
+            port_info[s]['classification'] = normaliser_classification(classification)
             if port_no == 0:
                 port_info[s]['port0'] = float(trafic) if trafic else 0
             elif port_no == 1:
@@ -551,6 +582,7 @@ def update_port_data(file_content: bytes):
         port_col = next((c for c in df.columns if 'port' in c.lower()), None)
         rx_max_col = next((c for c in df.columns if 'rxmaxspeed' in c.lower()), None)
         total_bw_col = next((c for c in df.columns if 'rxtotalbw' in c.lower() or 'totalbw' in c.lower()), None)
+        classification_col = next((c for c in df.columns if 'classification' in c.lower()), None)
         traf_col = next((c for c in df.columns if 'speed' in c.lower() or 'trafic' in c.lower() or 'mbit' in c.lower()), None)
         if not port_col or not ((rx_max_col and total_bw_col) or traf_col):
             print("⚠️ Colonnes port introuvables")
@@ -565,12 +597,14 @@ def update_port_data(file_content: bytes):
                     site VARCHAR(255) NOT NULL,
                     port_no INT NOT NULL,
                     trafic NUMERIC(15,4),
+                    classification VARCHAR(50),
                     date_import TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
                 )
             """)
             cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_port_data_site_port ON port_data (site, port_no)")
             conn.commit()
             print("   ✅ Table port_data créée")
+        cur.execute("ALTER TABLE port_data ADD COLUMN IF NOT EXISTS classification VARCHAR(50)")
         n = 0
         import_date = datetime.now()
         for _, row in df.iterrows():
@@ -580,10 +614,13 @@ def update_port_data(file_content: bytes):
             try:
                 capacity = to_float(row[total_bw_col]) if (rx_max_col and total_bw_col) else to_float(row[traf_col])
                 cur.execute("""
-                    INSERT INTO port_data (site, port_no, trafic, date_import)
-                    VALUES (%s,%s,%s,%s)
-                    ON CONFLICT (site, port_no) DO UPDATE SET trafic=EXCLUDED.trafic, date_import=EXCLUDED.date_import
-                """, (site, int(float(row[port_col])), capacity, import_date))
+                                        INSERT INTO port_data (site, port_no, trafic, classification, date_import)
+                                        VALUES (%s,%s,%s,%s,%s)
+                                        ON CONFLICT (site, port_no) DO UPDATE SET
+                                                trafic=EXCLUDED.trafic, classification=EXCLUDED.classification,
+                                                date_import=EXCLUDED.date_import
+                                """, (site, int(float(row[port_col])), capacity,
+                                            normaliser_classification(row[classification_col]) if classification_col else '', import_date))
                 n += 1
             except Exception:
                 continue
@@ -896,21 +933,27 @@ def construire_message_alerte(etat, nom, trafic_j, capacite, taux, type_trans, s
     if etat == 'SANS_TYPE':
         detail = f'type de liaison manquant ({str(type_trans).strip()})' if type_trans and str(type_trans).strip() else 'type de liaison non defini'
         return f"⚪ SITE SANS TYPE - {nom}: {detail}"
-    if etat in ('A_VERIFIER_CAPACITE', 'CAPACITE_A_VERIFIER'):
-        return f"🔴 CAPACITE A VERIFIER - {nom}: {trafic_j:.0f}/{capacite:.0f} Mbps ({taux:.1f}%)"
     if etat == 'RISQUE_DE_CONGESTION':
         return f"🟠 RISQUE DE CONGESTION - {nom}: {trafic_j:.0f}/{capacite:.0f} Mbps ({taux:.1f}%, occurrences < {SEUIL_OCCURRENCES_RISQUE_CONGESTION})"
-    if etat in ('CONGESTIONNE', 'CONGESTION'):
+    if etat == 'RISQUE_DE_BRIDAGE':
+        return f"🟡 RISQUE DE BRIDAGE - {nom}: {trafic_j:.0f}/{capacite:.0f} Mbps, occurrences entre {SEUIL_OCCURRENCES_VERIFICATION_CAPACITE} et {SEUIL_OCCURRENCES_BRIDAGE}"
+    if etat == 'CONGESTION':
         return f"🔴 CONGESTION - {nom}: {trafic_j:.0f}/{capacite:.0f} Mbps ({taux:.1f}%)"
-    if etat == 'CONGESTION(FDD)':
-        return f"🔴 CONGESTION FDD - {nom}: taux FDD {taux:.1f}%"
-    if etat == 'CONGESTION(TDD)':
-        return f"🔴 CONGESTION TDD - {nom}: taux TDD {taux:.1f}%"
-    return f"🟠 BRIDAGE - {nom}: {trafic_j:.0f}/{capacite:.0f} Mbps ({taux:.1f}%, occurrences >= {SEUIL_OCCURRENCES_BRIDAGE})"
+    if etat == 'BRIDAGE':
+        return f"🟠 BRIDAGE - {nom}: {trafic_j:.0f}/{capacite:.0f} Mbps ({taux:.1f}%, occurrences >= {SEUIL_OCCURRENCES_BRIDAGE})"
+    return f"ℹ️ {etat} - {nom}"
+
 
 def calculer_etat_avance(trafic_j, trafic_j1, trafic_j7, capacite, occurrences, classification,
                           occ_tdd=0, occ_fdd=0, taux_tdd=None, taux_fdd=None, s1_fail_dur=0):
-    # Cette fonction ignore totalement s1_fail_dur.
+    """
+    Vocabulaire UNIQUE et fermé :
+      etat   -> OK | RISQUE_DE_CONGESTION | RISQUE_DE_BRIDAGE | CONGESTION | BRIDAGE
+      status (dérivé plus bas dans analyser_etats_et_alertes) -> OK | SOUS_OBSERVATION | CRITIQUE
+    Aucune variante (FDD)/(TDD) n'est plus émise : pour COTRANS/NON-COTRANS on
+    prend le pire des deux sous-liens, mais l'étiquette retournée reste dans
+    le vocabulaire fermé ci-dessus.
+    """
     classification = (classification or '').upper().strip()
     occurrences = int(occurrences or 0)
     occ_tdd = int(occ_tdd or 0)
@@ -922,34 +965,34 @@ def calculer_etat_avance(trafic_j, trafic_j1, trafic_j7, capacite, occurrences, 
     var_j1 = variation_pct(trafic_j, trafic_j1) * 100
     var_j7 = variation_pct(trafic_j, trafic_j7) * 100
 
-    if classification in ('COTRANS', 'NO_COTRANS'):
-        fdd_congest = taux_fdd_val >= SEUIL_CONGESTION * 100 and occ_fdd >= SEUIL_OCCURRENCES_RISQUE_CONGESTION
-        tdd_congest = taux_tdd_val >= SEUIL_CONGESTION * 100 and occ_tdd >= SEUIL_OCCURRENCES_RISQUE_CONGESTION
-        if fdd_congest and tdd_congest:
-            return 'CONGESTION', taux, var_j1, var_j7
-        if fdd_congest:
-            return 'CONGESTION(FDD)', taux, var_j1, var_j7
-        if tdd_congest:
-            return 'CONGESTION(TDD)', taux, var_j1, var_j7
-        if ((taux_fdd_val >= SEUIL_CONGESTION * 100 and occ_fdd < SEUIL_OCCURRENCES_RISQUE_CONGESTION)
-                or (taux_tdd_val >= SEUIL_CONGESTION * 100 and occ_tdd < SEUIL_OCCURRENCES_RISQUE_CONGESTION)):
-            return 'RISQUE_DE_CONGESTION', taux, var_j1, var_j7
-        return 'OK', taux, var_j1, var_j7
+    def classer(taux_val, occ_val):
+        if taux_val >= SEUIL_CONGESTION * 100:
+            if occ_val >= SEUIL_OCCURRENCES_RISQUE_CONGESTION:
+                return 'CONGESTION'
+            return 'RISQUE_DE_CONGESTION'
+        if occ_val >= SEUIL_OCCURRENCES_BRIDAGE:
+            return 'BRIDAGE'
+        if occ_val >= SEUIL_OCCURRENCES_VERIFICATION_CAPACITE:
+            return 'RISQUE_DE_BRIDAGE'
+        return 'OK'
+
+    GRAVITE = {'OK': 0, 'RISQUE_DE_BRIDAGE': 1, 'RISQUE_DE_CONGESTION': 2, 'BRIDAGE': 3, 'CONGESTION': 4}
+    pire = lambda a, b: a if GRAVITE[a] >= GRAVITE[b] else b
+
+    if classification in ('COTRANS', 'NON-COTRANS', 'NO_COTRANS'):
+        etat = pire(classer(taux_fdd_val, occ_fdd), classer(taux_tdd_val, occ_tdd))
+        return etat, taux, var_j1, var_j7
 
     if capacite <= 0:
         return 'OK', taux, var_j1, var_j7
 
+    # Règle liaisons 10G non-TF : priorité BRIDAGE (conservée telle quelle)
     if (classification != 'TF' and abs(capacite - CAPACITE_10G_MBPS) < 1.0
             and taux >= SEUIL_CONGESTION * 100 and occurrences >= SEUIL_OCCURRENCES_RISQUE_CONGESTION):
         return 'BRIDAGE', taux, var_j1, var_j7
 
-    if taux >= SEUIL_CONGESTION * 100 and occurrences >= SEUIL_OCCURRENCES_RISQUE_CONGESTION:
-        return 'CONGESTION', taux, var_j1, var_j7
-    if taux >= SEUIL_CONGESTION * 100 and occurrences < SEUIL_OCCURRENCES_RISQUE_CONGESTION:
-        return 'RISQUE_DE_CONGESTION', taux, var_j1, var_j7
-    if taux < SEUIL_CONGESTION * 100 and occurrences >= SEUIL_OCCURRENCES_BRIDAGE:
-        return 'BRIDAGE', taux, var_j1, var_j7
-    return 'OK', taux, var_j1, var_j7
+    etat = classer(taux, occurrences)
+    return etat, taux, var_j1, var_j7
 
 def analyser_etats_et_alertes(sites_data: list) -> int:
     try:
@@ -985,8 +1028,9 @@ def analyser_etats_et_alertes(sites_data: list) -> int:
                 hist.setdefault(key, {})
                 hist[key][dj] = max(hist[key].get(dj, 0), trafic)
 
-        # ✅ COUPURE_S1 n'est pas un état critique pour le statut
-        etats_critiques = {'CONGESTION', 'CONGESTION(FDD)', 'CONGESTION(TDD)', 'BRIDAGE'}
+        # ✅ Vocabulaire fermé : status dérivé strictement de etat
+        etats_critiques = {'CONGESTION', 'BRIDAGE'}
+        etats_risque = {'RISQUE_DE_CONGESTION', 'RISQUE_DE_BRIDAGE'}
         alertes_count = 0
         erreurs_persistance = 0
 
@@ -1004,45 +1048,40 @@ def analyser_etats_et_alertes(sites_data: list) -> int:
             s1_fail_dur = float(site.get('S1_Fail_Duration', 0) or 0)
             s1_fail_date = site.get('S1_Fail_Date')
 
-            # On garde le site si S1 > 0 même si trafic/capacité sont à 0
             if not nom or ((trafic_j <= 0 or capacite <= 0) and s1_fail_dur <= 0):
-                site['etat_site'] = site.get('etat_site', 'NON_EVALUE')
-                site['site_status'] = site.get('site_status', 'NON_EVALUE')
+                site['etat_site'] = site.get('etat_site', 'OK')
+                site['status'] = site.get('status', 'OK')
+                site['site_status'] = site.get('site_status', 'OK')
                 site['is_critical'] = site.get('is_critical', False)
                 continue
 
             trafic_j1 = hist.get(nom, {}).get(date_j1, 0)
             trafic_j7 = hist.get(nom, {}).get(date_j7, 0)
 
-            # Calcul de l'état sans S1
             etat, taux, var_j1, var_j7 = calculer_etat_avance(
                 trafic_j, trafic_j1, trafic_j7, capacite, occurrences,
                 classification, occ_tdd, occ_fdd, taux_tdd, taux_fdd, s1_fail_dur
             )
 
-            taux_global_db = None if (classification or '').upper() in ('COTRANS', 'NO_COTRANS') else (round(taux, 2) if taux else None)
+            taux_global_db = None if (classification or '').upper() in ('COTRANS', 'NON-COTRANS', 'NO_COTRANS') else (round(taux, 2) if taux else None)
             type_manquant = type_trans_manquant(type_trans)
 
-            # Détermination du statut (S1 non pris en compte)
-            if etat in etats_critiques or etat == 'RISQUE_DE_CONGESTION':
-                etat_affiche = etat
-                site_status = 'CRITIQUE' if etat in etats_critiques else 'SURVEILLANCE'
-            elif type_manquant:
-                etat_affiche = 'SANS_TYPE'
-                site_status = 'SURVEILLANCE'
+            if etat in etats_critiques:
+                status = 'CRITIQUE'
+            elif etat in etats_risque:
+                status = 'SOUS_OBSERVATION'
             else:
-                etat_affiche = etat
-                site_status = 'SECURISE'
+                status = 'OK'
+            site_status = etat  # ✅ déjà dans le vocabulaire fermé, plus de reconstruction
 
-            # Mise à jour du site dans la liste (pour le retour)
-            site['etat_site'] = etat_affiche
+            site['etat_site'] = site_status
+            site['status'] = status
             site['site_status'] = site_status
-            site['is_critical'] = etat in etats_critiques   # S1 n'est pas inclus
+            site['is_critical'] = status == 'CRITIQUE'
 
             try:
                 cur.execute("SAVEPOINT site_sp")
 
-                # Insertion dans site_etat (S1 stocké mais non utilisé pour l'état)
                 cur.execute("""
                     INSERT INTO site_etat
                         (site, etat, trafic_j, trafic_j1, trafic_j7, capacite_mbps,
@@ -1058,18 +1097,16 @@ def analyser_etats_et_alertes(sites_data: list) -> int:
                         taux_utilisation_fdd=EXCLUDED.taux_utilisation_fdd,
                         s1_fail_duration=EXCLUDED.s1_fail_duration,
                         s1_fail_date=EXCLUDED.s1_fail_date, date_calcul=NOW()
-                """, (nom, etat_affiche, trafic_j, trafic_j1, trafic_j7, capacite,
+                """, (nom, site_status, trafic_j, trafic_j1, trafic_j7, capacite,
                       taux_global_db, round(var_j1, 2), round(var_j7, 2), date_j,
                       taux_tdd, taux_fdd, s1_fail_dur, s1_fail_date))
 
-                # Création des alertes (S1 ajouté mais n'affecte pas le statut)
                 alertes_a_creer = []
                 if s1_fail_dur > 0:
                     alertes_a_creer.append('COUPURE_S1')
                 if type_manquant:
                     alertes_a_creer.append('SANS_TYPE')
-                if etat in ('A_VERIFIER_CAPACITE', 'RISQUE_DE_CONGESTION', 'CONGESTION',
-                            'CONGESTION(FDD)', 'CONGESTION(TDD)', 'BRIDAGE'):
+                if etat in etats_critiques or etat in etats_risque:
                     alertes_a_creer.append(etat)
 
                 for etat_alerte in alertes_a_creer:
@@ -1139,6 +1176,7 @@ def analyser_etats_et_alertes(sites_data: list) -> int:
         print(f"⚠️ Erreur analyse états: {e}")
         traceback.print_exc()
         return 0
+    
 
 # ========== TRAITEMENT PRINCIPAL ==========
 
@@ -1203,7 +1241,7 @@ def traiter_fichiers(file_trafic_content, file_port_content=None, file_type_cont
                     site_simple = n
 
             if not has_known_suffix:
-                classification = '-'
+                classification = 'ONLY-FDD'
             elif site_tf:
                 classification = 'TF'
             elif site_tdd:
@@ -1211,20 +1249,26 @@ def traiter_fichiers(file_trafic_content, file_port_content=None, file_type_cont
                 if info.get('port0', 0) > 0:
                     classification = 'COTRANS'
                 elif info.get('port1', 0) > 0:
-                    classification = 'NO_COTRANS'
+                    classification = 'NON-COTRANS'
                 else:
-                    classification = 'ONLY_FDD'
+                    classification = 'ONLY-FDD'
             else:
-                classification = 'ONLY_FDD'
+                classification = 'ONLY-FDD'
+
+            port_classifications = [
+                normaliser_classification(port_info.get(n, {}).get('classification'))
+                for n in tous_noms
+            ]
+            port_classifications = [value for value in port_classifications if value]
+            if port_classifications:
+                classification = port_classifications[0]
 
             type_trans = 'NON_DEFINI'
-            for candidate in [site_fdd, site_tdd, site_tf, site_simple]:
+            for candidate in [site_fdd, site_tdd, site_tf, site_simple, prefix]:
                 if candidate:
-                    t = get_type_trans_for_prefix(extraire_prefixe(candidate), type_dict, capacite_dict)
+                    t = get_type_trans_for_site(candidate, type_dict, capacite_dict)
                     if t != 'NON_DEFINI':
                         type_trans = t; break
-            if type_trans == 'NON_DEFINI':
-                type_trans = get_type_trans_for_prefix(prefix, type_dict, capacite_dict)
 
             fdd_data = trafic_by_site.get(site_fdd, empty_trafic) if site_fdd else empty_trafic
             tdd_data = trafic_by_site.get(site_tdd, empty_trafic) if site_tdd else empty_trafic
@@ -1277,7 +1321,7 @@ def traiter_fichiers(file_trafic_content, file_port_content=None, file_type_cont
                         break
 
             # Calcul des métriques (comme avant)
-            if classification == '-':
+            if classification == 'ONLY-FDD':
                 ref = simple_data
                 if not ref.empty:
                     max_val = float(ref['MaxSpeed'].max())
@@ -1303,7 +1347,7 @@ def traiter_fichiers(file_trafic_content, file_port_content=None, file_type_cont
                     occ = int((ref['MaxSpeed'] >= seuil).sum())
                     date_max = ref.loc[ref['MaxSpeed'].idxmax(), 'DateTime'].strftime('%Y-%m-%d %H:%M:%S')
                     total_measures = len(ref)
-            elif classification == 'NO_COTRANS':
+            elif classification == 'NON-COTRANS':
                 if not fdd_data.empty and not tdd_data.empty:
                     max_fdd = float(fdd_data['MaxSpeed'].max())
                     max_tdd = float(tdd_data['MaxSpeed'].max())
@@ -1391,11 +1435,11 @@ def traiter_fichiers(file_trafic_content, file_port_content=None, file_type_cont
 
         stats = {
             'total_sites': len(tous_les_sites),
-            'sites_inconnus': sum(1 for s in tous_les_sites if s['Classification'] == '-'),
+            'sites_inconnus': sum(1 for s in tous_les_sites if s['Type_Trans'] == 'NON_DEFINI'),
             'sites_tf': sum(1 for s in tous_les_sites if s['Classification'] == 'TF'),
             'sites_cotrans': sum(1 for s in tous_les_sites if s['Classification'] == 'COTRANS'),
-            'sites_nocotrans': sum(1 for s in tous_les_sites if s['Classification'] == 'NO_COTRANS'),
-            'sites_only_fdd': sum(1 for s in tous_les_sites if s['Classification'] in ('ONLY_FDD', 'FDD')),
+            'sites_nocotrans': sum(1 for s in tous_les_sites if s['Classification'] == 'NON-COTRANS'),
+            'sites_only_fdd': sum(1 for s in tous_les_sites if s['Classification'] in ('ONLY-FDD', 'FDD')),
             'sites_s1_down': sum(1 for s in tous_les_sites if (s.get('S1_Fail_Duration') or 0) > 0),
             'date_analyse': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }

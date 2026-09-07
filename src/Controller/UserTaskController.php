@@ -31,7 +31,6 @@ class UserTaskController extends AbstractController
         $userService = strtoupper($user->getService() ?? '');
         $department = $user->getDepartment() ?? '';
 
-        // Redirection selon le service
         if ($userService === 'FO') {
             return $this->redirectToRoute('dashboard_fo_index');
         }
@@ -39,7 +38,6 @@ class UserTaskController extends AbstractController
             return $this->redirectToRoute('user_fh_tasks');
         }
         if ($userService === 'DEPLOIEMENT') {
-            // Redirection vers le département spécifique
             if ($department === 'support_radio') {
                 return $this->redirectToRoute('user_support_radio_index');
             }
@@ -49,25 +47,29 @@ class UserTaskController extends AbstractController
             return $this->redirectToRoute('user_deploiement_index');
         }
         if ($userService === 'SHARED') {
-    return $this->redirectToRoute('user_shared_tasks');
-}
+            return $this->redirectToRoute('user_shared_tasks');
+        }
 
-        // Fallback : afficher toutes les tâches assignées à l'utilisateur
         $allTasks = $taskRepo->findBy(['assignedTo' => $user], ['createdAt' => 'ASC']);
 
-        // Filtrer par service pour les utilisateurs non-SHARED
         if ($userService !== 'SHARED') {
             $tasks = array_filter($allTasks, function (TicketTask $task) use ($userService) {
-                $taskService = strtoupper($task->getServiceName() ?? '');
-                return $taskService === $userService;
+                return strtoupper($task->getServiceName() ?? '') === $userService;
             });
         } else {
             $tasks = $allTasks;
         }
 
+        // Priorité au site lié directement (nouveau modèle). Repli sur
+        // l'ancien tableau siteData uniquement pour les tâches créées
+        // avant la migration.
         $taskSitesMap = [];
         foreach ($tasks as $task) {
-            $taskSitesMap[$task->getId()] = $this->resolveSitesFromSiteData($task->getSiteData());
+            if ($task->getTicketSite()) {
+                $taskSitesMap[$task->getId()] = [$task->getTicketSite()];
+            } else {
+                $taskSitesMap[$task->getId()] = $this->resolveSitesFromSiteData($task->getSiteData());
+            }
         }
 
         return $this->render('dashboard/user/tasks/dashboard.html.twig', [
@@ -95,33 +97,26 @@ class UserTaskController extends AbstractController
             return $this->redirectToRoute('user_tasks_dashboard');
         }
 
-        $siteData = $task->getSiteData() ?? [];
-        $allSites = [];
-        foreach ($siteData as $siteId) {
-            $site = $this->processedSiteRepo->find($siteId);
-            if ($site) {
-                $allSites[] = $site;
-            }
+        if ($task->getTicketSite()) {
+            $sites = [$task->getTicketSite()];
+        } else {
+            $sites = array_values(array_filter(
+                $this->resolveSitesFromSiteData($task->getSiteData()),
+                function ($site) use ($taskService) {
+                    if ($taskService === 'SHARED') return true;
+                    return strtoupper($site->getService() ?? '') === $taskService;
+                }
+            ));
         }
 
-        $filteredSites = array_filter(
-            $this->resolveSitesFromSiteData($task->getSiteData()),
-            function($site) use ($taskService) {
-                if ($taskService === 'SHARED') {
-                    return true;
-                }
-                $siteService = strtoupper($site->getService() ?? '');
-                return $siteService === $taskService;
-            }
-        );
-        if (empty($filteredSites)) {
+        if (empty($sites)) {
             $this->addFlash('warning', 'Aucun site correspondant à votre service dans cette tâche.');
             return $this->redirectToRoute('user_tasks_dashboard');
         }
 
         return $this->render('dashboard/user/tasks/show.html.twig', [
             'task' => $task,
-            'sites' => array_values($filteredSites),
+            'sites' => $sites,
         ]);
     }
 
@@ -145,6 +140,12 @@ class UserTaskController extends AbstractController
         return $this->redirectToRoute('user_task_show', ['id' => $task->getId()]);
     }
 
+    /**
+     * ⚠️ Flux legacy indépendant du moteur Ticket/TicketSite/WorkflowEngineService
+     * (voir tableau des fichiers à vérifier ci-dessous). Conservé tel quel
+     * pour ne pas casser l'existant, mais à faire migrer vers
+     * WorkflowEngineService::completeTaskForSite() dès que possible.
+     */
     #[Route('/{taskId}/site/{siteId}/decision', name: 'user_task_site_decision', methods: ['POST'])]
     public function siteDecision(
         int $taskId,
@@ -232,15 +233,6 @@ class UserTaskController extends AbstractController
         return $this->json(['success' => true]);
     }
 
-
-    /**
-     * 🔧 FIX défensif : task.siteData devrait toujours être une liste plate d'IDs entiers
-     * (int|numeric-string), mais certains chemins de code y écrivent par erreur des tableaux
-     * de données de formulaire. On ignore silencieusement toute entrée qui n'est pas un
-     * identifiant scalaire valide, plutôt que de planter avec MissingIdentifierField.
-     *
-     * @return \App\Entity\ProcessedSite[]
-     */
     private function resolveSitesFromSiteData(?array $siteData): array
     {
         if (!$siteData) {
@@ -250,7 +242,6 @@ class UserTaskController extends AbstractController
         $sites = [];
         foreach ($siteData as $siteId) {
             if (!is_int($siteId) && !(is_string($siteId) && ctype_digit($siteId))) {
-                // Donnée malformée (ex: tableau de formulaire) — on l'ignore proprement
                 continue;
             }
             $site = $this->processedSiteRepo->find((int) $siteId);

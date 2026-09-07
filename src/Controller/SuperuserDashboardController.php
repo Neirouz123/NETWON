@@ -1,13 +1,12 @@
 <?php
-
+// src/Controller/SuperuserDashboardController.php
 namespace App\Controller;
-
 
 use App\Entity\ProcessedSite;
 use App\Repository\ProcessedSiteRepository;
 use App\Repository\TicketRepository;
 use App\Repository\NotificationRepository;
-use App\Repository\SiteAlertRepository; // ✅ IMPORTANT : ajout ici
+use App\Repository\SiteAlertRepository;
 use App\Service\IaRecommendationService;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -18,7 +17,6 @@ use Symfony\Component\Routing\Attribute\Route;
 
 class SuperuserDashboardController extends AbstractController
 {
-
     #[Route('/superuser/dashboard', name: 'superuser_dashboard_home')]
     public function superuserDashboard(
         Request $request,
@@ -33,12 +31,9 @@ class SuperuserDashboardController extends AbstractController
         $criticalFilter = $request->query->get('critical');
 
         $totalSites = $processedSiteRepository->countAllSites($serviceFilter);
-
-        // ✅ Utilisation de siteStatus = 'CRITIQUE' pour correspondre à la page Alertes (117)
         $criticalSites = $processedSiteRepository->countBySiteStatus('CRITIQUE', $serviceFilter);
         $criticalPercentage = $totalSites > 0 ? round(($criticalSites / $totalSites) * 100, 1) : 0;
 
-        // Total des alertes réseau récentes (événements, pas sites distincts)
         $alertCounts = $siteAlertRepository->countByEtat(7);
         $defaults = ['CONGESTION' => 0, 'BRIDAGE' => 0, 'RISQUE_DE_CONGESTION' => 0];
         $alertCounts = array_merge($defaults, $alertCounts);
@@ -50,7 +45,6 @@ class SuperuserDashboardController extends AbstractController
         $allServices = array_keys($serviceDistribution);
         $allClassifications = array_keys($processedSiteRepository->getClassificationStats(null));
 
-        // Avancement réel des workflows
         $workflowStats = $ticketRepository->getWorkflowSitesProgress();
 
         $activeWorkflows = (int) $ticketRepository->createQueryBuilder('t')
@@ -61,7 +55,6 @@ class SuperuserDashboardController extends AbstractController
             ->getSingleScalarResult();
 
         $totalWorkflows = (int) $ticketRepository->createQueryBuilder('t')->select('COUNT(t.id)')->getQuery()->getSingleScalarResult();
-
         $recentProcessedSites = $ticketRepository->findRecentlyProcessedTicketSites(5);
 
         return $this->render('dashboard/superuser/home.html.twig', [
@@ -84,6 +77,7 @@ class SuperuserDashboardController extends AbstractController
             'recentProcessedSites' => $recentProcessedSites,
         ]);
     }
+
     #[Route('/superuser/plan-data', name: 'superuser_plan_data')]
     public function planData(
         Request $request,
@@ -131,18 +125,26 @@ class SuperuserDashboardController extends AbstractController
         $sansTypeSites = 0;
         $congestionSites = 0;
         $bridageSites = 0;
-        $aVerifierSites = 0;
         $s1DownSites = 0;
 
         foreach ($allSites as $site) {
-            $status = $site->getSiteStatus() ?? 'NON_EVALUE';
-            $etat = $site->getStatus() ?? 'OK';
+            // ✅ Normalisation à la lecture pour compter correctement
+            // même les anciennes lignes ('critical' -> CRITIQUE, etc.)
+            $status = strtoupper((string) ($site->getStatus() ?? 'OK'));
+            $status = match ($status) {
+                'CRITICAL' => 'CRITIQUE',
+                'SURVEILLANCE', 'WARNING' => 'SOUS_OBSERVATION',
+                'SECURISE', 'SECURE' => 'OK',
+                default => $status,
+            };
+            $etat = strtoupper((string) ($site->getSiteStatus() ?? 'OK'));
+            $etat = $etat === 'CONGESTIONNE' ? 'CONGESTION' : $etat;
 
             if ($status === 'CRITIQUE') {
                 $criticalSites++;
-            } elseif ($status === 'SURVEILLANCE') {
+            } elseif ($status === 'SOUS_OBSERVATION') {
                 $warningSites++;
-            } elseif ($status === 'SECURISE') {
+            } elseif ($status === 'OK') {
                 $secureSites++;
             }
 
@@ -150,14 +152,15 @@ class SuperuserDashboardController extends AbstractController
                 $s1DownSites++;
             }
 
-            if ($etat === 'SANS_TYPE') {
+            $typeTrans = strtoupper(trim((string) $site->getTypeTrans()));
+            if ($typeTrans === '' || in_array($typeTrans, ['NON_DEFINI', 'UNKNOWN', 'N/A', 'NA', '-'], true)) {
                 $sansTypeSites++;
-            } elseif (str_contains($etat, 'CONGESTION')) {
+            }
+
+            if (str_contains($etat, 'CONGESTION')) {
                 $congestionSites++;
             } elseif ($etat === 'BRIDAGE') {
                 $bridageSites++;
-            } elseif ($etat === 'A_VERIFIER_CAPACITE') {
-                $aVerifierSites++;
             }
         }
 
@@ -188,18 +191,13 @@ class SuperuserDashboardController extends AbstractController
             'sansTypeSites' => $sansTypeSites,
             'congestionSites' => $congestionSites,
             'bridageSites' => $bridageSites,
-            'aVerifierSites' => $aVerifierSites,
             'totalSites' => $totalSites,
             'services' => $services,
             'classifications' => $classifications,
             'currentService' => $service,
             'currentClassification' => $classification,
             'currentSearch' => $search,
-            'pagination' => [
-                'page' => $page,
-                'totalPages' => $totalPages,
-                'total' => $totalSites,
-            ],
+            'pagination' => ['page' => $page, 'totalPages' => $totalPages, 'total' => $totalSites],
             'imported' => $imported,
             'importNeeded' => $totalSites === 0,
             'isTop10' => $top10,
@@ -207,7 +205,6 @@ class SuperuserDashboardController extends AbstractController
             's1DownSites' => $s1DownSites,
         ]);
     }
-    // src/Controller/SuperuserDashboardController.php
 
     #[Route('/superuser/ia-recommendations', name: 'superuser_ia_recommendations', methods: ['GET', 'POST'])]
     public function iaRecommendations(
@@ -223,34 +220,29 @@ class SuperuserDashboardController extends AbstractController
         $search = trim((string) $request->query->get('search', ''));
         $filter = $request->query->get('filter', 'all');
 
-        // Récupérer tous les sites selon les filtres
         $allSites = $processedSiteRepository->findAllSitesOrderedByStatus(
             $service ?: null,
             $classification ?: null,
             $search
         );
 
-        // Filtrer : garder uniquement les sites non sécurisés (CRITIQUE ou SURVEILLANCE)
         $targetSites = array_filter($allSites, function (ProcessedSite $site) {
-            $status = $site->getSiteStatus() ?? 'NON_EVALUE';
+            $status = strtoupper((string) ($site->getSiteStatus() ?? 'NON_EVALUE'));
+            $status = $status === 'CRITICAL' ? 'CRITIQUE' : $status;
             return in_array($status, ['CRITIQUE', 'SURVEILLANCE'], true);
         });
 
-        // Générer les recommandations
         $recommendations = $iaService->analyzeSites($targetSites);
 
-        // Récupérer les données de trafic en batch pour tous les préfixes
         $prefixes = array_map(fn($s) => $s->getSiteName(), $targetSites);
         $batchTraffic = $processedSiteRepository->getTrafficHistoryForPrefixes($prefixes, 30);
 
-        // Alimenter chaque recommandation avec les données réelles
         foreach ($recommendations as &$rec) {
             $siteName = $rec['siteName'];
             $data = $batchTraffic[$siteName] ?? ['labels' => [], 'values' => []];
 
             $rec['currentTrafficData'] = $data;
 
-            // Projection après action (cible 65% du taux)
             $tauxActuel = $rec['tauxGlobal'];
             $targetUtil = 65.0;
             $ratio = ($tauxActuel > $targetUtil && $tauxActuel > 0) ? ($targetUtil / $tauxActuel) : 1.0;
@@ -265,7 +257,6 @@ class SuperuserDashboardController extends AbstractController
         }
         unset($rec);
 
-        // Filtre Top 10 (si demandé)
         if ($filter === 'top10') {
             usort($recommendations, function ($a, $b) {
                 if ($b['nombreOccurrences'] !== $a['nombreOccurrences']) {
@@ -279,7 +270,6 @@ class SuperuserDashboardController extends AbstractController
         $globalStats = $iaService->generateGlobalActionPlan($recommendations);
         $allActionTypes = $iaService->getAllActionTypes();
 
-        // POST : création du workflow
         if ($request->isMethod('POST')) {
             $selectedSiteIds = $request->request->all('selected_sites');
 
@@ -340,71 +330,7 @@ class SuperuserDashboardController extends AbstractController
             'currentFilter' => $filter,
         ]);
     }
-    private function buildRealTrafficData(
-        ProcessedSite $site,
-        ProcessedSiteRepository $repo,
-        float $congestionLevel
-    ): array {
-        $siteName = $site->getSiteName();
-        $days = 30;
-        $totalSeries = [];
 
-        try {
-            $kpiData = $repo->getKpiCurvesDataForPrefix($siteName, null, null, $days);
-            $totalSeries = $kpiData['series']['traffic']['total'] ?? [];
-        } catch (\Throwable $e) {
-            $totalSeries = [];
-        }
-
-        if (empty($totalSeries)) {
-            $rows = $repo->getTrafficHistoryForSiteExact($siteName, $days);
-            foreach ($rows as $row) {
-                $timestamp = strtotime((string) ($row['date_heure'] ?? ($row['date_jour'] ?? '')));
-                if ($timestamp === false) {
-                    continue;
-                }
-                $totalSeries[] = [
-                    'x' => $timestamp * 1000,
-                    'y' => round((float) ($row['trafic_total'] ?? 0), 2),
-                ];
-            }
-        }
-
-        if (empty($totalSeries)) {
-            return [
-                'current' => ['labels' => [], 'values' => []],
-                'after' => ['labels' => [], 'values' => []],
-                'hasData' => false,
-            ];
-        }
-
-        $labels = [];
-        $currentValues = [];
-        foreach ($totalSeries as $point) {
-            $labels[] = date('d/m H:i', intdiv((int) $point['x'], 1000));
-            $currentValues[] = (float) $point['y'];
-        }
-
-        $targetUtilization = 65.0;
-        $ratio = ($congestionLevel > $targetUtilization && $congestionLevel > 0)
-            ? ($targetUtilization / $congestionLevel)
-            : 1.0;
-
-        $afterValues = array_map(fn($v) => round($v * $ratio, 2), $currentValues);
-
-        return [
-            'current' => ['labels' => $labels, 'values' => $currentValues],
-            'after' => ['labels' => $labels, 'values' => $afterValues],
-            'hasData' => true,
-        ];
-    }
-
-    /**
-     * ✅ MODIFIÉ : ajout du filtre "status" (Sans capacité / Sans type /
-     * Sécurisé / Critique / Sous observation / Congestion / Bridage /
-     * Risque de congestion / À vérifier capacité / Non évalué), transmis
-     * à findSitesPaginated() et exposé au template via statusOptions.
-     */
     #[Route('/superuser/sites', name: 'superuser_dashboard_sites')]
     public function superuserSites(Request $request, ProcessedSiteRepository $processedSiteRepository): Response
     {
@@ -428,6 +354,7 @@ class SuperuserDashboardController extends AbstractController
         $classifications = array_keys($classificationStats);
         $serviceDistribution = $processedSiteRepository->getServiceDistribution();
         $services = array_keys($serviceDistribution);
+
         return $this->render('dashboard/superuser/sites.html.twig', [
             'sites' => $pagination['items'],
             'pagination' => $pagination,
@@ -454,13 +381,9 @@ class SuperuserDashboardController extends AbstractController
     public function exportForm(ProcessedSiteRepository $repo): Response
     {
         $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
-
-        // Récupération des périodes d'import disponibles (depuis trafic_historique)
-        $periods = $repo->getAvailableImportWeeks(); // à implémenter (voir plus bas)
-
-        // Définition des colonnes disponibles
+        $periods = $repo->getAvailableImportWeeks();
         $allColumns = $this->getAvailableColumns();
-        $defaultColumns = ['site', 'classification', 'typeTrans', 'maxTrafic', 'maxTraficTdd', 'maxTraficFdd']; // colonnes pré-cochées
+        $defaultColumns = $this->getPlanDataColumnsOrder();
 
         return $this->render('dashboard/superuser/export.html.twig', [
             'services' => array_keys($repo->getServiceDistribution()),
@@ -485,12 +408,9 @@ class SuperuserDashboardController extends AbstractController
     }
 
     #[Route('/superuser/kpis/data', name: 'superuser_kpis_data', methods: ['GET'])]
-    public function kpisData(
-        Request $request,
-        ProcessedSiteRepository $repo
-    ): JsonResponse {
+    public function kpisData(Request $request, ProcessedSiteRepository $repo): JsonResponse
+    {
         $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
-
         $prefix = $request->query->get('site');
         $start = $request->query->get('start');
         $end = $request->query->get('end');
@@ -515,8 +435,6 @@ class SuperuserDashboardController extends AbstractController
         }
     }
 
-
-
     #[Route('/superuser/alerts', name: 'superuser_dashboard_alerts')]
     public function alerts(
         ProcessedSiteRepository $processedSiteRepository,
@@ -525,23 +443,18 @@ class SuperuserDashboardController extends AbstractController
     ): Response {
         $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
 
-        // Récupération des alertes réseau des 7 derniers jours
         $siteAlerts = $siteAlertRepository->findRecentAlerts(7);
 
-        // Pour chaque alerte, on récupère les notifications liées
         $alertNotifications = [];
         foreach ($siteAlerts as $alert) {
             $notifs = $notificationRepository->findBy(['alert' => $alert]);
             $alertNotifications[$alert->getId()] = $notifs;
         }
 
-        // Compteurs par état
         $siteAlertCounts = $siteAlertRepository->countByEtat(7);
-        // Assurer les clés par défaut
         $defaults = ['CONGESTION' => 0, 'BRIDAGE' => 0, 'RISQUE_DE_CONGESTION' => 0];
         $siteAlertCounts = array_merge($defaults, $siteAlertCounts);
 
-        // Notifications de retard (workflow) existantes
         $notifications = $notificationRepository->createQueryBuilder('n')
             ->where('n.type IN (:types)')
             ->setParameter('types', ['deadline_reminder', 'ticket_overdue', 'deadline_overdue', 'deadline_yellow', 'deadline_red'])
@@ -571,207 +484,46 @@ class SuperuserDashboardController extends AbstractController
     {
         $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
         $tickets = $ticketRepository->findBy(['workflowType' => 'FH']);
-        return $this->render('dashboard/superuser/fh_workflows.html.twig', [
-            'tickets' => $tickets,
-        ]);
-    }
-
-    #[Route('/superuser/plan-data/export', name: 'superuser_export_plan_data')]
-    public function exportPlanData(
-        Request $request,
-        ProcessedSiteRepository $repo
-    ): Response {
-        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
-
-        $service = $request->query->get('service');
-        $classification = $request->query->get('classification');
-        $search = $request->query->get('search');
-
-        $sites = $repo->findAllSitesOrderedByStatus($service, $classification, $search);
-
-        $handle = fopen('php://temp', 'r+');
-        fwrite($handle, "\xEF\xBB\xBF");
-
-        fputcsv($handle, [
-            'Site',
-            'Service',
-            'Classification',
-            'Type Trans',
-            'Max Trafic Total',
-            'Max Trafic TDD',
-            'Max Trafic FDD',
-            'Capacite TDD',
-            'Capacite FDD',
-            'Capacite Totale',
-            'Taux Util Global',
-            'Taux Util TDD',
-            'Taux Util FDD',
-            'Statut',
-            'Etat',
-            'Latitude',
-            'Longitude'
-        ], ';');
-
-        foreach ($sites as $site) {
-            fputcsv($handle, [
-                $site->getSiteName(),
-                $site->getServiceName(),
-                $site->getClassification(),
-                $site->getTypeTrans(),
-                $site->getMaxTrafic(),
-                $site->getMaxTraficTdd(),
-                $site->getMaxTraficFdd(),
-                $site->getCapaciteTddMbps(),
-                $site->getCapaciteFddMbps(),
-                $site->getCapaciteMbps(),
-                $site->getTauxUtilisation(),
-                $site->getTauxUtilisationTdd(),
-                $site->getTauxUtilisationFdd(),
-                $site->getSiteStatus(),
-                $site->getStatus(),
-                $site->getLatitude(),
-                $site->getLongitude()
-            ], ';');
-        }
-
-        rewind($handle);
-        $csv = stream_get_contents($handle);
-        fclose($handle);
-
-        return new Response($csv, 200, [
-            'Content-Type' => 'text/csv; charset=UTF-8',
-            'Content-Disposition' => 'attachment; filename="plan_data_' . date('Ymd_His') . '.csv"',
-        ]);
-    }
-
-    #[Route('/superuser/sites/export', name: 'superuser_dashboard_sites_export', methods: ['GET'])]
-    public function exportSitesCsv(
-        Request $request,
-        ProcessedSiteRepository $processedSiteRepository
-    ): Response {
-        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
-
-        // Récupération des filtres depuis la requête
-        $service = $request->query->get('service');
-        $classification = $request->query->get('classification');
-        $statusFilter = $request->query->get('status');
-        $search = $request->query->get('search');
-
-        // Récupération des sites selon les filtres (on utilise la même méthode que l'admin)
-        $sites = $processedSiteRepository->findSitesForExport(
-            $service,
-            $classification,
-            $statusFilter,
-            $search
-        );
-
-        // Création du CSV avec BOM UTF-8
-        $handle = fopen('php://temp', 'r+');
-        fwrite($handle, "\xEF\xBB\xBF");
-
-        // En-têtes
-        fputcsv($handle, [
-            'Site',
-            'Classification',
-            'Type Trans',
-            'Max TDD (Mbps)',
-            'Max FDD (Mbps)',
-            'Trafic Max (Mbps)',
-            'Capacité TDD (Mbps)',
-            'Capacité FDD (Mbps)',
-            'Taux Utilisation Global (%)',
-            'Taux Utilisation TDD (%)',
-            'Taux Utilisation FDD (%)',
-            'Occurrences',
-            'Occurrence TDD',
-            'Occurrence FDD',
-            'Statut (status)',
-            'État (siteStatus)',
-            'Service',
-            'Critique',
-            'DropCong TDD',
-            'DropCong FDD',
-            'DropCong TF'
-        ], ';');
-
-        foreach ($sites as $site) {
-            fputcsv($handle, [
-                $site->getSiteName(),
-                $site->getClassification() ?? '-',
-                $site->getTypeTrans() ?? '-',
-                $site->getMaxTraficTdd() ?? '-',
-                $site->getMaxTraficFdd() ?? '-',
-                $site->getMaxTrafic() ?? '-',
-                $site->getCapaciteTddMbps() ?? '-',
-                $site->getCapaciteFddMbps() ?? '-',
-                $site->getTauxUtilisation() ?? '-',
-                $site->getTauxUtilisationTdd() ?? '-',
-                $site->getTauxUtilisationFdd() ?? '-',
-                $site->getNombreOccurrences() ?? '-',
-                $site->getNombreOccurrencesTdd() ?? '-',
-                $site->getNombreOccurrencesFdd() ?? '-',
-                $site->getStatus() ?? '-',
-                $site->getSiteStatus() ?? '-',
-                $site->getServiceName() ?? '-',
-                $site->isCritical() ? 'Oui' : 'Non',
-                $site->getDropCongTdd() ?? '-',
-                $site->getDropCongFdd() ?? '-',
-                $site->getDropCongTf() ?? '-',
-            ], ';');
-        }
-
-        rewind($handle);
-        $csvContent = stream_get_contents($handle);
-        fclose($handle);
-
-        $filename = 'sites_export_' . date('Y-m-d_His') . '.csv';
-
-        return new Response($csvContent, 200, [
-            'Content-Type' => 'text/csv; charset=utf-8',
-            'Content-Disposition' => 'attachment; filename="' . $filename . '"',
-        ]);
-    }
-
-
-    #[Route('/superuser/export/generate', name: 'superuser_export_generate', methods: ['POST'])]
-    public function exportSites(
-        Request $request,
-        ProcessedSiteRepository $repo
-    ): Response {
-        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
-
-        // Récupération des filtres
-        $service = $request->request->get('service_filter');
-        $classification = $request->request->get('classification_filter');
-        $search = $request->request->get('site_search');
-        $periodStart = $request->request->get('period_start');
-        $periodEnd = $request->request->get('period_end');
-        $selectedColumns = $request->request->all('columns', []);
-
-        // Récupération des sites selon les filtres
-        $sites = $repo->findForAdvancedExport(
-            $service && $service !== 'all' ? $service : null,
-            'all',
-            [],
-            $search ?: '',
-            $periodStart ?: null,
-            $periodEnd ?: null
-        );
-
-        // Filtre supplémentaire par classification si précisé
-        if ($classification && $classification !== 'all') {
-            $sites = array_filter($sites, function ($site) use ($classification) {
-                return strtoupper((string) $site->getClassification()) === strtoupper($classification);
-            });
-        }
-
-        // Construction du CSV avec les colonnes sélectionnées
-        return $this->buildCsvResponse($sites, $selectedColumns);
+        return $this->render('dashboard/superuser/fh_workflows.html.twig', ['tickets' => $tickets]);
     }
 
     /**
-     * Retourne la liste des colonnes disponibles pour l'export.
+     * ✅ Ordre + jeu de colonnes EXACTEMENT identique à celui affiché dans
+     * l'interface "Sites" et "Plan Data" (demande utilisateur point c/g) :
+     * quel que soit l'export utilisé (Plan Data, Sites, export avancé),
+     * on exporte toujours ce même tableau.
      */
+    private function getPlanDataColumnsOrder(): array
+    {
+        return [
+            'site',
+            'classification',
+            'typeTrans',
+            'maxTraficTdd',
+            'maxTraficFdd',
+            'maxTrafic',
+            'capaciteTdd',
+            'capaciteFdd',
+            'tauxUtilisation',
+            'tauxUtilisationTdd',
+            'tauxUtilisationFdd',
+            'nombreOccurrences',
+            'nombreOccurrencesTdd',
+            'nombreOccurrencesFdd',
+            'status',
+            'siteStatus',
+            'dropCongTdd',
+            'dropCongFdd',
+            'dropCongTf',
+            'longitude',
+            'latitude',
+            's1FailDuration',
+            's1FailDate',
+            'capaciteUpdatedAt',
+            'lastActionPerformed',
+        ];
+    }
+
     private function getAvailableColumns(): array
     {
         return [
@@ -791,58 +543,147 @@ class SuperuserDashboardController extends AbstractController
             'nombreOccurrencesFdd' => ['label' => 'Occurrence FDD', 'getter' => 'getNombreOccurrencesFdd'],
             'status' => ['label' => 'Statut (status)', 'getter' => 'getStatus'],
             'siteStatus' => ['label' => 'État (siteStatus)', 'getter' => 'getSiteStatus'],
-            'service' => ['label' => 'Service', 'getter' => 'getServiceName'],
-            'isCritical' => ['label' => 'Critique', 'getter' => 'isCritical'],
             'dropCongTdd' => ['label' => 'DropCong TDD', 'getter' => 'getDropCongTdd'],
             'dropCongFdd' => ['label' => 'DropCong FDD', 'getter' => 'getDropCongFdd'],
             'dropCongTf' => ['label' => 'DropCong TF', 'getter' => 'getDropCongTf'],
+            'longitude' => ['label' => 'Longitude', 'getter' => 'getLongitude'],
+            'latitude' => ['label' => 'Latitude', 'getter' => 'getLatitude'],
+            's1FailDuration' => ['label' => 'S1 Fail (s)', 'getter' => 'getS1FailDuration'],
+            's1FailDate' => ['label' => 'Date coupure S1', 'getter' => 'getS1FailDate'],
+            'capaciteUpdatedAt' => ['label' => 'MAJ Capacité', 'getter' => 'getCapaciteUpdatedAt'],
+            'lastActionPerformed' => ['label' => 'Dernière action', 'getter' => 'getLastActionPerformed'],
         ];
     }
 
     /**
-     * Génère un CSV avec les colonnes sélectionnées.
+     * ✅ Normalise 'status'/'siteStatus' vers le vocabulaire canonique
+     * pour l'affichage/export, même pour les lignes historiques.
      */
-    private function buildCsvResponse(array $sites, array $selectedColumns = []): Response
+    private function normalizeExportValue(string $key, $value)
+    {
+        if ($value === null) {
+            return null;
+        }
+        if ($key === 'siteStatus') {
+            $v = strtoupper(trim((string) $value));
+            return match ($v) {
+                'CONGESTION', 'CONGESTIONNE', 'CONGESTION(FDD)', 'CONGESTION(TDD)' => 'CONGESTION',
+                'BRIDAGE' => 'BRIDAGE',
+                'RISQUE_DE_CONGESTION' => 'RISQUE_DE_CONGESTION',
+                'RISQUE_DE_BRIDAGE' => 'RISQUE_DE_BRIDAGE',
+                '' => 'OK',
+                default => in_array($v, ['SURVEILLANCE', 'SOUS_OBSERVATION'], true) ? 'RISQUE_DE_CONGESTION' : $v,
+            };
+        }
+        if ($key === 'status') {
+            $v = strtoupper(trim((string) $value));
+            return match ($v) {
+                'CRITIQUE', 'CRITICAL' => 'CRITIQUE',
+                'SOUS_OBSERVATION', 'SURVEILLANCE', 'WARNING' => 'SOUS_OBSERVATION',
+                'OK', 'SECURISE', 'SECURE', '' => 'OK',
+                default => $v,
+            };
+        }
+        return $value;
+    }
+
+    #[Route('/superuser/plan-data/export', name: 'superuser_export_plan_data')]
+    public function exportPlanData(Request $request, ProcessedSiteRepository $repo): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
+
+        $service = $request->query->get('service');
+        $classification = $request->query->get('classification');
+        $search = $request->query->get('search');
+
+        $sites = $repo->findAllSitesOrderedByStatus($service, $classification, $search);
+
+        return $this->buildCsvResponse($sites, $this->getPlanDataColumnsOrder(), 'plan_data');
+    }
+
+    #[Route('/superuser/sites/export', name: 'superuser_dashboard_sites_export', methods: ['GET'])]
+    public function exportSitesCsv(Request $request, ProcessedSiteRepository $processedSiteRepository): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
+
+        $service = $request->query->get('service');
+        $classification = $request->query->get('classification');
+        $statusFilter = $request->query->get('status');
+        $search = $request->query->get('search');
+
+        $sites = $processedSiteRepository->findSitesForExport($service, $classification, $statusFilter, $search);
+
+        return $this->buildCsvResponse($sites, $this->getPlanDataColumnsOrder(), 'sites_export');
+    }
+
+    #[Route('/superuser/export/generate', name: 'superuser_export_generate', methods: ['POST'])]
+    public function exportSites(Request $request, ProcessedSiteRepository $repo): Response
+    {
+        $this->denyAccessUnlessGranted('ROLE_SUPERUSER');
+
+        $service = $request->request->get('service_filter');
+        $classification = $request->request->get('classification_filter');
+        $search = $request->request->get('site_search');
+        $periodStart = $request->request->get('period_start');
+        $periodEnd = $request->request->get('period_end');
+        $selectedColumns = $request->request->all('columns', []);
+
+        $sites = $repo->findForAdvancedExport(
+            $service && $service !== 'all' ? $service : null,
+            'all',
+            [],
+            $search ?: '',
+            $periodStart ?: null,
+            $periodEnd ?: null
+        );
+
+        if ($classification && $classification !== 'all') {
+            $sites = array_filter($sites, function ($site) use ($classification) {
+                return strtoupper((string) $site->getClassification()) === strtoupper($classification);
+            });
+        }
+
+        return $this->buildCsvResponse($sites, $selectedColumns ?: $this->getPlanDataColumnsOrder(), 'sites_export');
+    }
+
+    private function buildCsvResponse(iterable $sites, array $selectedColumns, string $filenamePrefix): Response
     {
         $availableColumns = $this->getAvailableColumns();
 
-        // Si aucune colonne sélectionnée, on prend toutes par défaut
         if (empty($selectedColumns)) {
-            $selectedColumns = array_keys($availableColumns);
+            $selectedColumns = $this->getPlanDataColumnsOrder();
         }
-
-        // Filtrer les colonnes valides
-        $selectedColumns = array_intersect($selectedColumns, array_keys($availableColumns));
+        $selectedColumns = array_values(array_intersect($selectedColumns, array_keys($availableColumns)));
 
         $handle = fopen('php://temp', 'r+');
-        fwrite($handle, "\xEF\xBB\xBF"); // BOM pour Excel
+        fwrite($handle, "\xEF\xBB\xBF");
 
-        // En-têtes
         $headers = [];
         foreach ($selectedColumns as $key) {
             $headers[] = $availableColumns[$key]['label'];
         }
         fputcsv($handle, $headers, ';');
 
-        // Données
         foreach ($sites as $site) {
             $row = [];
             foreach ($selectedColumns as $key) {
                 $getter = $availableColumns[$key]['getter'];
                 $value = $site->$getter();
+                $value = $this->normalizeExportValue($key, $value);
 
-                // Traitement spécial pour la colonne Critique
-                if ($key === 'isCritical') {
-                    $value = $value ? 'Oui' : 'Non';
+                if ($key === 's1FailDuration') {
+                    $value = ($value !== null && $value > 0) ? number_format((float) $value, 0, '.', '') : '-';
+                } elseif ($key === 's1FailDate' || $key === 'capaciteUpdatedAt') {
+                    $value = $value instanceof \DateTimeInterface ? $value->format('d/m/Y H:i') : '-';
+                } elseif ($key === 'longitude' || $key === 'latitude') {
+                    $value = $value !== null ? number_format((float) $value, 6, '.', '') : '-';
                 }
 
-                // Si null, on affiche '-'
                 if ($value === null || $value === '') {
                     $value = '-';
                 }
 
-                // Formatage des nombres (sauf booléens)
-                if (is_numeric($value) && !is_bool($value) && $key !== 'isCritical') {
+                if (is_numeric($value) && !is_bool($value) && !in_array($key, ['s1FailDuration', 'longitude', 'latitude', 'nombreOccurrences', 'nombreOccurrencesTdd', 'nombreOccurrencesFdd', 'dropCongTdd', 'dropCongFdd', 'dropCongTf'], true)) {
                     $value = number_format((float) $value, 2, '.', '');
                 }
 
@@ -855,7 +696,7 @@ class SuperuserDashboardController extends AbstractController
         $csv = stream_get_contents($handle);
         fclose($handle);
 
-        $filename = 'sites_export_' . date('Y-m-d_His') . '.csv';
+        $filename = $filenamePrefix . '_' . date('Y-m-d_His') . '.csv';
 
         return new Response($csv, 200, [
             'Content-Type' => 'text/csv; charset=UTF-8',

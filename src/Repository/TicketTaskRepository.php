@@ -18,6 +18,7 @@ class TicketTaskRepository extends ServiceEntityRepository
     {
         return $this->createQueryBuilder('tt')
             ->leftJoin('tt.ticket', 't')->addSelect('t')
+            ->leftJoin('tt.ticketSite', 'ts')->addSelect('ts')
             ->andWhere('tt.assignedTo = :user')
             ->setParameter('user', $user)
             ->orderBy('tt.createdAt', 'DESC')
@@ -28,6 +29,7 @@ class TicketTaskRepository extends ServiceEntityRepository
     {
         return $this->createQueryBuilder('tt')
             ->leftJoin('tt.ticket', 't')->addSelect('t')
+            ->leftJoin('tt.ticketSite', 'ts')->addSelect('ts')
             ->andWhere('tt.assignedTo = :user')
             ->andWhere('tt.status IN (:statuses)')
             ->setParameter('user', $user)
@@ -136,5 +138,21 @@ class TicketTaskRepository extends ServiceEntityRepository
              FROM App\\Entity\\TicketTask tt JOIN tt.ticket t
              WHERE tt.serviceName IS NOT NULL GROUP BY tt.serviceName ORDER BY tt.serviceName ASC'
         )->getArrayResult();
+    }
+
+    /**
+     * Tâches actives d'un user, avec le site déjà chargé (évite le N+1
+     * et remplace le filtrage manuel par serviceName fait auparavant
+     * côté contrôleur).
+     */
+    public function findByAssignedUserWithSite(User $user): array
+    {
+        return $this->createQueryBuilder('tt')
+            ->leftJoin('tt.ticket', 't')->addSelect('t')
+            ->leftJoin('tt.ticketSite', 'ts')->addSelect('ts')
+            ->andWhere('tt.assignedTo = :user')
+            ->setParameter('user', $user)
+            ->orderBy('tt.createdAt', 'ASC')
+            ->getQuery()->getResult();
     }
 }
