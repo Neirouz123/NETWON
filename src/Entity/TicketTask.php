@@ -9,7 +9,6 @@ use Doctrine\ORM\Mapping as ORM;
 #[ORM\Entity(repositoryClass: TicketTaskRepository::class)]
 class TicketTask
 {
-    // Statuts de la tâche
     public const STATUS_PENDING = 'pending';
     public const STATUS_IN_PROGRESS = 'in_progress';
     public const STATUS_DONE = 'done';
@@ -18,17 +17,16 @@ class TicketTask
     public const STATUS_WAITING_IP = 'waiting_ip';
     public const STATUS_WAITING_DEPLOYMENT = 'waiting_deployment';
 
+    public const STEP_FH_ETUDE_PREREQUIS = 'fh_etude_prerequis';
+    public const STEP_FH_MAJ_CAPACITE = 'fh_maj_capacite';
+    public const STEP_FH_ING_TRANS_CAP = 'fh_ing_trans_cap';
+    public const STEP_FH_MLO = 'fh_mlo';
+    public const STEP_FH_LLD = 'fh_lld';
+    public const STEP_FH_EXECUTION_WO = 'fh_execution_wo';
+    public const STEP_FH_VALIDATION_CAPILLAIRE = 'fh_validation_capillaire';
+    public const STEP_FH_MLO_VALIDATION = 'fh_mlo_validation';
 
-// Étapes FH
-public const STEP_FH_ETUDE_PREREQUIS = 'fh_etude_prerequis';
-public const STEP_FH_MAJ_CAPACITE = 'fh_maj_capacite';
-public const STEP_FH_ING_TRANS_CAP = 'fh_ing_trans_cap';
-public const STEP_FH_MLO = 'fh_mlo';
-public const STEP_FH_LLD = 'fh_lld';
-public const STEP_FH_EXECUTION_WO = 'fh_execution_wo';
-
-    // Étapes FO
-public const STEP_FO_INITIAL_ANALYSIS = 'fo_initial_analysis';
+    public const STEP_FO_INITIAL_ANALYSIS = 'fo_initial_analysis';
     public const STEP_FO_WO_IP_CREATION = 'fo_wo_ip_creation';
     public const STEP_FO_DEPLOYMENT_PLANNING = 'fo_deployment_planning';
     public const STEP_FO_SITE_EXECUTION = 'fo_site_execution';
@@ -39,9 +37,7 @@ public const STEP_FO_INITIAL_ANALYSIS = 'fo_initial_analysis';
     public const STEP_FO_CAPILLAIRE_DEPLOYMENT = 'fo_capillaire_deployment';
     public const STEP_FO_CAPILLAIRE_VALIDATION = 'fo_capillaire_validation';
     public const STEP_FO_IP_SWAP_ANALYSIS = 'fo_ip_swap_analysis';
-    
-   
-    // Autres étapes
+
     public const STEP_ENGINEERING_IP = 'engineering_ip';
     public const STEP_ANALYSE_COMPLEMENTAIRE = 'analyse_complementaire';
     public const STEP_CAPILLAIRE_FO = 'capillaire_fo';
@@ -53,8 +49,6 @@ public const STEP_FO_INITIAL_ANALYSIS = 'fo_initial_analysis';
     public const STEP_VERIFICATION_KPI = 'verification_kpi';
     public const STEP_SUPERUSER_VALIDATION = 'superuser_validation';
 
-
-      // Étapes Déploiement (communes)
     public const STEP_DEPLOIEMENT_PLANIFICATION = 'deploiement_planification';
     public const STEP_DEPLOIEMENT_EXECUTION = 'deploiement_execution';
     public const STEP_DEPLOIEMENT_VALIDATION = 'deploiement_validation';
@@ -67,6 +61,21 @@ public const STEP_FO_INITIAL_ANALYSIS = 'fo_initial_analysis';
     #[ORM\ManyToOne(inversedBy: 'tasks')]
     #[ORM\JoinColumn(nullable: false, onDelete: 'CASCADE')]
     private ?Ticket $ticket = null;
+
+    // === AJOUT : lien direct vers le site individuel traité par cette tâche ===
+    #[ORM\ManyToOne(targetEntity: TicketSite::class, inversedBy: 'tasks')]
+    #[ORM\JoinColumn(nullable: true, onDelete: 'CASCADE')]
+    private ?TicketSite $ticketSite = null;
+
+    public function getTicketSite(): ?TicketSite
+    {
+        return $this->ticketSite;
+    }
+    public function setTicketSite(?TicketSite $ticketSite): static
+    {
+        $this->ticketSite = $ticketSite;
+        return $this;
+    }
 
     #[ORM\ManyToOne(targetEntity: User::class)]
     #[ORM\JoinColumn(nullable: false)]
@@ -118,19 +127,17 @@ public const STEP_FO_INITIAL_ANALYSIS = 'fo_initial_analysis';
     private ?\DateTimeInterface $updatedAt = null;
 
     #[ORM\Column(type: 'datetime', nullable: true)]
-private ?\DateTimeInterface $startedAt = null;
+    private ?\DateTimeInterface $startedAt = null;
 
-// Getter et Setter
-public function getStartedAt(): ?\DateTimeInterface
-{
-    return $this->startedAt;
-}
-
-public function setStartedAt(?\DateTimeInterface $startedAt): static
-{
-    $this->startedAt = $startedAt;
-    return $this;
-}
+    public function getStartedAt(): ?\DateTimeInterface
+    {
+        return $this->startedAt;
+    }
+    public function setStartedAt(?\DateTimeInterface $startedAt): static
+    {
+        $this->startedAt = $startedAt;
+        return $this;
+    }
 
     #[ORM\Column(length: 50, nullable: true)]
     private ?string $cardType = null;
@@ -147,16 +154,13 @@ public function setStartedAt(?\DateTimeInterface $startedAt): static
     #[ORM\Column(type: 'json', nullable: true)]
     private ?array $siteDecisions = null;
 
+    /**
+     * @deprecated conservé uniquement pour lire les anciennes tâches créées
+     * avant l'introduction de la relation ticketSite. Ne plus écrire dedans.
+     */
     #[ORM\Column(type: 'json', nullable: true)]
     private ?array $siteData = null;
 
-    public function __construct()
-    {
-        $this->createdAt = new \DateTime();
-    }
-
-
-    // ... propriétés existantes ...
     #[ORM\Column(type: 'text', nullable: true)]
     private ?string $woIpContent = null;
 
@@ -166,11 +170,20 @@ public function setStartedAt(?\DateTimeInterface $startedAt): static
     #[ORM\Column(type: 'json', nullable: true)]
     private ?array $deploiementData = null;
 
-   
-    public function getDeploiementData(): ?array { return $this->deploiementData; }
-    public function setDeploiementData(?array $deploiementData): self { $this->deploiementData = $deploiementData; return $this; }
+    public function __construct()
+    {
+        $this->createdAt = new \DateTime();
+    }
 
-
+    public function getDeploiementData(): ?array
+    {
+        return $this->deploiementData;
+    }
+    public function setDeploiementData(?array $deploiementData): self
+    {
+        $this->deploiementData = $deploiementData;
+        return $this;
+    }
 
     public function getWoIpContent(): ?string
     {
@@ -191,8 +204,6 @@ public function setStartedAt(?\DateTimeInterface $startedAt): static
         $this->fhFields = $fhFields;
         return $this;
     }
-
-    // === Getters / Setters ===
 
     public function getId(): ?int
     {
@@ -419,10 +430,12 @@ public function setStartedAt(?\DateTimeInterface $startedAt): static
         return $this;
     }
 
+    /** @deprecated utiliser getTicketSite() */
     public function getSiteData(): ?array
     {
         return $this->siteData;
     }
+    /** @deprecated utiliser setTicketSite() */
     public function setSiteData(?array $siteData): static
     {
         $this->siteData = $siteData;
@@ -433,12 +446,10 @@ public function setStartedAt(?\DateTimeInterface $startedAt): static
     {
         return in_array($this->status, [self::STATUS_DONE, self::STATUS_COMPLETED], true);
     }
-
     public function isPending(): bool
     {
         return $this->status === self::STATUS_PENDING;
     }
-
     public function isInProgress(): bool
     {
         return $this->status === self::STATUS_IN_PROGRESS;

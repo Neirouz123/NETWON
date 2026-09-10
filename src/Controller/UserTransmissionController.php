@@ -22,7 +22,6 @@ use Symfony\Component\Routing\Attribute\Route;
 #[Route('/user/transmission')]
 class UserTransmissionController extends AbstractController
 {
-    use WorkflowControllerTrait;
 
     #[Route('/tickets', name: 'user_transmission_tickets', methods: ['GET'])]
     public function index(

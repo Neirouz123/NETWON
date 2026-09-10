@@ -1,4 +1,3 @@
-// src/Service/DefaultUserInitializer.php
 <?php
 
 namespace App\Service;

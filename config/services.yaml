@@ -31,7 +31,6 @@ services:
         tags:
             - { name: doctrine.event_listener, event: postPersist }
             - { name: doctrine.event_listener, event: postUpdate }
-            - { name: kernel.event_listener, event: kernel.request, priority: 10 }
     App\Service\Security\IpBlocklistService:
         arguments:
             $ipWhitelist: '%security_ip_whitelist%'

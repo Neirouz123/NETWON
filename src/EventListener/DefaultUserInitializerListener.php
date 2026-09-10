@@ -1,4 +1,3 @@
-// src/EventListener/DefaultUserInitializerListener.php
 <?php
 
 namespace App\EventListener;

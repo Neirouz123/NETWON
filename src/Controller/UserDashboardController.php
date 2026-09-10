@@ -182,6 +182,7 @@ public function home(
         }
     }
 
+    
     #[Route('/dashboard/alerts', name: 'user_dashboard_alerts')]
 public function userAlerts(
     ProcessedSiteRepository $processedSiteRepository,
