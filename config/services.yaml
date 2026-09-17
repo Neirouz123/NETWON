@@ -1,6 +1,7 @@
 parameters:
     ticket_proofs_directory: '%kernel.project_dir%/public/uploads/ticket_proofs'
     cron_token: '%env(CRON_TOKEN)%'
+    net_forecasting_url: '%env(NET_FORECASTING_URL)%'
     security_ip_whitelist:
         - '127.0.0.1'
         - '::1'

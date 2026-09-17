@@ -1,0 +1,12 @@
+statsmodels
+lightgbm
+mlforecast
+utilsforecast
+scikit-learn
+joblib
+optuna
+pandas
+numpy
+streamlit
+plotly
+openpyxl

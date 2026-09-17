@@ -59,6 +59,24 @@ services:
       retries: 5
       start_period: 30s
 
+  net-forecasting:
+    build:
+      context: .
+      dockerfile: net_forecasting/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${NET_FORECASTING_PORT:-8501}:8501"
+    volumes:
+      - net_forecasting_data:/app/data
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   symfony:
     build:
       context: .
@@ -78,6 +96,7 @@ services:
       CRON_TOKEN: ${CRON_TOKEN:-change_this_secret_token}
       MAILER_DSN: ${MAILER_DSN:-smtp://mailpit:1025}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      NET_FORECASTING_URL: ${NET_FORECASTING_URL:-http://localhost:8501}
     networks:
       - backend
       - frontend
@@ -101,3 +120,4 @@ networks:
 
 volumes:
   postgres_data:
+  net_forecasting_data:

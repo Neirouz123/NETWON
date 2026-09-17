@@ -1,0 +1,50 @@
+# =========================
+# Data
+# =========================
+
+data/raw/*
+!data/raw/.gitkeep
+
+data/processed/*
+!data/processed/.gitkeep
+
+
+# =========================
+# Generated models
+# =========================
+
+data/model/*
+!data/model/.gitkeep
+
+data/export/*
+!data/export/.gitkeep
+
+
+# =========================
+# Python
+# =========================
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# =========================
+# Jupyter
+# =========================
+
+.ipynb_checkpoints/
+
+# =========================
+# Environment / secrets
+# =========================
+
+.env
+*.env
+
+# =========================
+# Logs
+# =========================
+
+*.log

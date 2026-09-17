@@ -280,6 +280,7 @@
                             <span class="netbot-icon">🤖</span>
                             <span>NetBot</span>
                         </a>
+                        <a class="nav-link" href="{{ net_forecasting_url }}" target="_blank" rel="noopener" title="Ouvre le simulateur de congestion (service séparé)">📈 Simulateur Congestion</a>
 
                     {# === SUPERUSER : notifications ajoutées === #}
                     {% elseif is_granted('ROLE_SUPERUSER') %}
@@ -290,6 +291,7 @@
                         <a class="nav-link {{ currentRoute == 'superuser_dashboard_sites' ? 'active' : '' }}" href="{{ path('superuser_dashboard_sites') }}">Sites</a>
                         <a class="nav-link {{ currentRoute == 'superuser_dashboard_alerts' ? 'active' : '' }}" href="{{ path('superuser_dashboard_alerts') }}">Alerts</a>
                         <a class="nav-link {{ currentRoute starts with 'superuser_ia_' ? 'active' : '' }}" href="{{ path('superuser_ia_dashboard') }}">🧠 IA Prédictions</a>
+                        <a class="nav-link" href="{{ net_forecasting_url }}" target="_blank" rel="noopener" title="Ouvre le simulateur de congestion (service séparé)">📈 Simulateur Congestion</a>
                         <a class="nav-link {{ currentRoute starts with 'superuser_workflow_' ? 'active' : '' }}" href="{{ path('superuser_workflow_index') }}">Workflow</a>
 
                         {% set unread = unread_notifications_count() %}

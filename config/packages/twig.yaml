@@ -1,5 +1,7 @@
 twig:
     file_name_pattern: '*.twig'
+    globals:
+        net_forecasting_url: '%net_forecasting_url%'
 
 when@test:
     twig:
